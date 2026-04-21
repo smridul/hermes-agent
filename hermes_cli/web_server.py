@@ -45,6 +45,10 @@ from hermes_cli.config import (
     check_config_version,
     redact_key,
 )
+from hermes_cli.trusted_proxy import (
+    has_valid_trusted_proxy_header,
+    trusted_proxy_unauthorized_response,
+)
 from gateway.status import get_running_pid, read_runtime_status
 
 try:
@@ -2054,7 +2058,7 @@ def mount_spa(application: FastAPI):
     application.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")
 
     @application.get("/{full_path:path}")
-    async def serve_spa(full_path: str):
+    async def serve_spa(full_path: str, request: Request):
         file_path = WEB_DIST / full_path
         # Prevent path traversal via url-encoded sequences (%2e%2e/)
         if (
@@ -2064,6 +2068,8 @@ def mount_spa(application: FastAPI):
             and file_path.is_file()
         ):
             return FileResponse(file_path)
+        if not has_valid_trusted_proxy_header(request):
+            return trusted_proxy_unauthorized_response()
         return _serve_index()
 
 

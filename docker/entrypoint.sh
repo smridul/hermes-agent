@@ -22,15 +22,12 @@ if [ "$(id -u)" = "0" ]; then
         groupmod -o -g "$HERMES_GID" hermes 2>/dev/null || true
     fi
 
-    actual_hermes_uid=$(id -u hermes)
-    if [ "$(stat -c %u "$HERMES_HOME" 2>/dev/null)" != "$actual_hermes_uid" ]; then
-        echo "$HERMES_HOME is not owned by $actual_hermes_uid, fixing"
-        # In rootless Podman the container's "root" is mapped to an unprivileged
-        # host UID — chown will fail.  That's fine: the volume is already owned
-        # by the mapped user on the host side.
-        chown -R hermes:hermes "$HERMES_HOME" 2>/dev/null || \
-            echo "Warning: chown failed (rootless container?) — continuing anyway"
-    fi
+    echo "Fixing $HERMES_HOME ownership for hermes"
+    # In rootless Podman the container's "root" is mapped to an unprivileged
+    # host UID — chown will fail.  That's fine when the volume is already owned
+    # by the mapped user on the host side.
+    chown -R hermes:hermes "$HERMES_HOME" 2>/dev/null || \
+        echo "Warning: chown failed (rootless container?) — continuing anyway"
 
     echo "Dropping root privileges"
     exec gosu hermes "$0" "$@"
@@ -66,6 +63,36 @@ fi
 # Sync bundled skills (manifest-based so user edits are preserved)
 if [ -d "$INSTALL_DIR/skills" ]; then
     python3 "$INSTALL_DIR/tools/skills_sync.py"
+fi
+
+if [ "$#" -eq 0 ] || [ "$1" = "serve" ] || [ "$1" = "coolify" ]; then
+    dashboard_host="${HERMES_DASHBOARD_HOST:-0.0.0.0}"
+    dashboard_port="${HERMES_DASHBOARD_PORT:-9119}"
+
+    echo "Starting Hermes Gateway in background..."
+    hermes gateway run --replace &
+    gateway_pid="$!"
+
+    echo "Starting Hermes Dashboard on ${dashboard_host}:${dashboard_port}..."
+    hermes dashboard \
+        --host "$dashboard_host" \
+        --port "$dashboard_port" \
+        --no-open \
+        --insecure &
+    dashboard_pid="$!"
+
+    shutdown() {
+        kill -TERM "$gateway_pid" "$dashboard_pid" 2>/dev/null || true
+        wait "$gateway_pid" "$dashboard_pid" 2>/dev/null || true
+    }
+
+    trap shutdown INT TERM
+    set +e
+    wait -n "$gateway_pid" "$dashboard_pid"
+    status="$?"
+    set -e
+    shutdown
+    exit "$status"
 fi
 
 exec hermes "$@"

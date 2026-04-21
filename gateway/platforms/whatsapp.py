@@ -31,6 +31,32 @@ from hermes_constants import get_hermes_dir
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_BRIDGE_INSTALL_TIMEOUT_SECONDS = 300
+
+
+def _bridge_install_timeout_seconds() -> int:
+    """Resolve the npm dependency install timeout for the WhatsApp bridge."""
+    raw = os.getenv("WHATSAPP_BRIDGE_INSTALL_TIMEOUT", "").strip()
+    if raw:
+        try:
+            timeout = int(float(raw))
+            if timeout > 0:
+                return timeout
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid WHATSAPP_BRIDGE_INSTALL_TIMEOUT=%r; using %ss",
+                raw,
+                _DEFAULT_BRIDGE_INSTALL_TIMEOUT_SECONDS,
+            )
+    return _DEFAULT_BRIDGE_INSTALL_TIMEOUT_SECONDS
+
+
+def _bridge_install_command(bridge_dir: Path) -> list[str]:
+    """Prefer deterministic lockfile installs when available."""
+    if (bridge_dir / "package-lock.json").exists():
+        return ["npm", "ci", "--silent", "--no-audit", "--no-fund"]
+    return ["npm", "install", "--silent"]
+
 
 def _kill_port_process(port: int) -> None:
     """Kill any process listening on the given TCP port."""
@@ -379,15 +405,17 @@ class WhatsAppAdapter(BasePlatformAdapter):
             if not (bridge_dir / "node_modules").exists():
                 print(f"[{self.name}] Installing WhatsApp bridge dependencies...")
                 try:
+                    install_cmd = _bridge_install_command(bridge_dir)
+                    install_timeout = _bridge_install_timeout_seconds()
                     install_result = subprocess.run(
-                        ["npm", "install", "--silent"],
+                        install_cmd,
                         cwd=str(bridge_dir),
                         capture_output=True,
                         text=True,
-                        timeout=60,
+                        timeout=install_timeout,
                     )
                     if install_result.returncode != 0:
-                        print(f"[{self.name}] npm install failed: {install_result.stderr}")
+                        print(f"[{self.name}] Dependency install failed: {install_result.stderr}")
                         return False
                     print(f"[{self.name}] Dependencies installed")
                 except Exception as e:

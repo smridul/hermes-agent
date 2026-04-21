@@ -48,7 +48,10 @@ RUN uv venv && \
     uv pip install --no-cache-dir -e ".[all]"
 
 # ---------- Runtime ----------
+USER root
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_HOME=/opt/data
 VOLUME [ "/opt/data" ]
+EXPOSE 9119
 ENTRYPOINT [ "/opt/hermes/docker/entrypoint.sh" ]
+CMD [ "serve" ]
