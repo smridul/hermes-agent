@@ -914,6 +914,12 @@ class MessageEvent:
     # completion notifications) that must bypass user authorization checks.
     internal: bool = False
 
+    # Canonical WhatsApp sender identity (numeric, alias-collapsed via
+    # gateway.whatsapp_identity.canonical_whatsapp_identifier).  Populated
+    # by the WhatsApp adapter; None for other platforms.  Used by
+    # sender-based profile routing to look up the target profile.
+    canonical_sender_id: Optional[str] = None
+
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
     
