@@ -14,7 +14,9 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
 # that would otherwise accumulate when hermes runs as PID 1. See #15012.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    build-essential curl nodejs npm python3 ripgrep ffmpeg gcc python3-dev libffi-dev procps git openssh-client docker-cli tini tmux && \
+    build-essential curl nodejs npm python3 ripgrep ffmpeg gcc python3-dev libffi-dev procps git openssh-client docker-cli tini tmux \
+    vim less bash-completion \
+    zsh zsh-autosuggestions zsh-syntax-highlighting fzf && \
     rm -rf /var/lib/apt/lists/*
 
 # Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
@@ -68,6 +70,60 @@ RUN cd web && npm run build && \
 # The venv needs to be traversable too.
 USER root
 RUN chmod -R a+rX /opt/hermes
+
+# ---------- Smart interactive shell (zsh + autosuggestions + history search) ----------
+# Activated for any user who shells in via `docker exec -it <container> zsh`.
+# Mac-like behaviours: gray inline suggestions, live syntax highlighting,
+# Up/Down history-prefix search, Ctrl-R fzf history, Ctrl-T fzf file finder,
+# case-insensitive tab completion.  Bash falls back to a slimmer setup in
+# /etc/profile.d/hermes-shell.sh below.
+RUN mkdir -p /etc/zsh/zshrc.d && cat > /etc/zsh/zshrc.d/hermes.zsh <<'EOF'
+HISTFILE=$HOME/.zsh_history
+HISTSIZE=20000
+SAVEHIST=20000
+setopt INC_APPEND_HISTORY HIST_IGNORE_ALL_DUPS HIST_FIND_NO_DUPS HIST_REDUCE_BLANKS SHARE_HISTORY
+setopt AUTO_CD INTERACTIVE_COMMENTS NO_BEEP EXTENDED_GLOB
+autoload -Uz compinit && compinit -u
+zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|=*' 'l:|=* r:|=*'
+zstyle ':completion:*' menu select
+autoload -Uz history-search-end
+zle -N history-beginning-search-backward-end history-search-end
+zle -N history-beginning-search-forward-end history-search-end
+bindkey "\e[A" history-beginning-search-backward-end
+bindkey "\e[B" history-beginning-search-forward-end
+[ -r /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ] && . /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+[ -r /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ] && . /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+[ -r /usr/share/doc/fzf/examples/key-bindings.zsh ] && . /usr/share/doc/fzf/examples/key-bindings.zsh
+[ -r /usr/share/doc/fzf/examples/completion.zsh ] && . /usr/share/doc/fzf/examples/completion.zsh
+autoload -Uz colors && colors
+PROMPT='%F{green}%n@hermes%f:%F{blue}%~%f%# '
+alias ls='ls --color=auto'
+alias ll='ls -lah'
+alias grep='grep --color=auto'
+export LESS='-R'
+EOF
+
+# Bash users get tab-completion + a sane prompt via /etc/profile.d/.
+RUN cat > /etc/profile.d/hermes-shell.sh <<'EOF'
+if [ -n "$BASH_VERSION" ] && [ -z "$BASH_COMPLETION_VERSINFO" ]; then
+    if [ -r /usr/share/bash-completion/bash_completion ]; then
+        . /usr/share/bash-completion/bash_completion
+    fi
+fi
+if [[ $- == *i* ]]; then
+    export PS1='\[\e[32m\]\u@hermes\[\e[0m\]:\[\e[34m\]\w\[\e[0m\]\$ '
+    export LESS='-R'
+    alias ls='ls --color=auto'
+    alias ll='ls -lah'
+    alias grep='grep --color=auto'
+fi
+EOF
+RUN chmod 0644 /etc/profile.d/hermes-shell.sh
+
+# Make zsh the default shell for the hermes runtime user so `docker exec
+# -it <container> $SHELL` (or just no-shell-flag) lands you in the smart shell.
+RUN chsh -s /usr/bin/zsh hermes
+
 # Start as root so the entrypoint can usermod/groupmod + gosu.
 # If HERMES_UID is unset, the entrypoint drops to the default hermes user (10000).
 
