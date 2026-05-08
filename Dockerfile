@@ -77,6 +77,19 @@ RUN chmod -R a+rX /opt/hermes
 # Up/Down history-prefix search, Ctrl-R fzf history, Ctrl-T fzf file finder,
 # case-insensitive tab completion.  Bash falls back to a slimmer setup in
 # /etc/profile.d/hermes-shell.sh below.
+# Debian's /etc/zsh/zshrc does not source /etc/zsh/zshrc.d/ by default,
+# so drop a tiny sourcer alongside the customizations.
+RUN cat >> /etc/zsh/zshrc <<'EOF'
+
+# Source Hermes customizations dropped into /etc/zsh/zshrc.d/.
+if [ -d /etc/zsh/zshrc.d ]; then
+    for f in /etc/zsh/zshrc.d/*.zsh; do
+        [ -r "$f" ] && source "$f"
+    done
+    unset f
+fi
+EOF
+
 RUN mkdir -p /etc/zsh/zshrc.d && cat > /etc/zsh/zshrc.d/hermes.zsh <<'EOF'
 HISTFILE=$HOME/.zsh_history
 HISTSIZE=20000
