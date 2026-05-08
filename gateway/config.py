@@ -108,6 +108,7 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    IPC = "ipc"
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -376,6 +377,10 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
         (cfg.extra.get("client_id") or os.getenv("DINGTALK_CLIENT_ID"))
         and (cfg.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET"))
     ),
+    # IPC is the worker-side adapter for sender-based profile routing.
+    # No external auth — if the gateway has enabled it, it's "connected"
+    # by virtue of having an open stdin pipe.
+    Platform.IPC: lambda cfg: True,
 }
 
 
@@ -415,6 +420,14 @@ class GatewayConfig:
 
     # Unauthorized DM policy
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
+
+    # WhatsApp sender-based profile routing (optional).  When set, ingress
+    # spawns one Hermes worker subprocess per non-primary profile listed in
+    # the routing config.  Routed inbound WhatsApp messages dispatch to the
+    # right worker; replies travel back through ingress's WhatsApp adapter.
+    # See gateway/profile_routing_config.py and the design doc at
+    # docs/superpowers/specs/2026-05-07-whatsapp-sender-profile-routing-design.md.
+    whatsapp_profile_routing: Optional["ProfileRoutingConfig"] = None
 
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
@@ -911,6 +924,14 @@ def load_gateway_config() -> GatewayConfig:
                     if isinstance(gaf, list):
                         gaf = ",".join(str(v) for v in gaf)
                     os.environ["WHATSAPP_GROUP_ALLOWED_USERS"] = str(gaf)
+                # Sender-based profile routing.  Parsing/validation (canonical
+                # IDs, default-in-profiles, no duplicates, ...) lives in
+                # gateway/profile_routing_config.py so this loader stays thin.
+                if "profile_routing" in whatsapp_cfg:
+                    from gateway.profile_routing_config import parse_profile_routing
+                    config.whatsapp_profile_routing = parse_profile_routing(
+                        whatsapp_cfg.get("profile_routing")
+                    )
 
             # DingTalk settings → env vars (env vars take precedence)
             dingtalk_cfg = yaml_cfg.get("dingtalk", {})

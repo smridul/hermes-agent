@@ -136,6 +136,7 @@ from gateway.platforms.base import (
     cache_image_from_url,
     cache_audio_from_url,
 )
+from gateway.whatsapp_identity import canonical_whatsapp_identifier
 
 
 def check_whatsapp_requirements() -> bool:
@@ -1118,6 +1119,13 @@ class WhatsAppAdapter(BasePlatformAdapter):
                         except Exception as e:
                             print(f"[{self.name}] Failed to read document text: {e}", flush=True)
 
+            sender_id_raw = data.get("senderId") or ""
+            canonical_sender_id = (
+                canonical_whatsapp_identifier(sender_id_raw)
+                if sender_id_raw
+                else None
+            )
+
             return MessageEvent(
                 text=body,
                 message_type=msg_type,
@@ -1126,6 +1134,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 message_id=data.get("messageId"),
                 media_urls=cached_urls,
                 media_types=media_types,
+                canonical_sender_id=canonical_sender_id or None,
             )
         except Exception as e:
             print(f"[{self.name}] Error building event: {e}")
