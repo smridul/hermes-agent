@@ -42,6 +42,43 @@ def test_routing_config_creates_manager_and_router(tmp_path, monkeypatch):
     assert runner.primary_profile_name == "main"
 
 
+def test_load_gateway_config_parses_profile_routing_from_yaml(tmp_path, monkeypatch):
+    """Regression: load_gateway_config must NOT crash with NameError on
+    'config' when profile_routing is present in the yaml file. Bug fixed
+    by parsing routing into a function-scoped local before the
+    GatewayConfig object is constructed.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        """
+whatsapp:
+  profile_routing:
+    profiles: ["default", "family"]
+    default_profile: "default"
+    sender_profile_map:
+      "+15551234567": "default"
+      "+15557654321": "family"
+"""
+    )
+    from gateway.config import load_gateway_config
+
+    cfg = load_gateway_config()
+    assert cfg.whatsapp_profile_routing is not None
+    assert cfg.whatsapp_profile_routing.default_profile == "default"
+    assert "family" in cfg.whatsapp_profile_routing.profiles
+    assert cfg.whatsapp_profile_routing.sender_profile_map["15557654321"] == "family"
+
+
+def test_load_gateway_config_no_routing_block_works(tmp_path, monkeypatch):
+    """A config.yaml without profile_routing must load cleanly."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("whatsapp: {}\n")
+    from gateway.config import load_gateway_config
+
+    cfg = load_gateway_config()
+    assert cfg.whatsapp_profile_routing is None
+
+
 def test_primary_profile_name_falls_back_when_home_is_root(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     from gateway.config import GatewayConfig

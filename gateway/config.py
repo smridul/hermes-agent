@@ -654,6 +654,7 @@ def load_gateway_config() -> GatewayConfig:
             logger.warning("Failed to load %s: %s", gateway_json_path, e)
 
     # Primary source: config.yaml
+    _parsed_whatsapp_routing = None
     try:
         import yaml
         config_yaml_path = _home / "config.yaml"
@@ -927,9 +928,12 @@ def load_gateway_config() -> GatewayConfig:
                 # Sender-based profile routing.  Parsing/validation (canonical
                 # IDs, default-in-profiles, no duplicates, ...) lives in
                 # gateway/profile_routing_config.py so this loader stays thin.
+                # Captured into _parsed_whatsapp_routing here, attached to the
+                # GatewayConfig instance AFTER it's constructed below — the
+                # ``config`` variable doesn't exist yet at this point.
                 if "profile_routing" in whatsapp_cfg:
                     from gateway.profile_routing_config import parse_profile_routing
-                    config.whatsapp_profile_routing = parse_profile_routing(
+                    _parsed_whatsapp_routing = parse_profile_routing(
                         whatsapp_cfg.get("profile_routing")
                     )
 
@@ -981,6 +985,12 @@ def load_gateway_config() -> GatewayConfig:
         )
 
     config = GatewayConfig.from_dict(gw_data)
+
+    # Attach the parsed WhatsApp profile-routing config (parsed inside
+    # the try-block above and held in a function-scoped local).  Stays
+    # None when routing isn't configured or yaml parsing failed.
+    if _parsed_whatsapp_routing is not None:
+        config.whatsapp_profile_routing = _parsed_whatsapp_routing
 
     # Override with environment variables
     _apply_env_overrides(config)
