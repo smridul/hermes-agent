@@ -93,6 +93,50 @@ async def test_profile_worker_dies_immediately_raises(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_worker_logs_to_stderr_do_not_pollute_stdout_ipc(tmp_path):
+    """A worker that writes diagnostics to stderr must not corrupt stdout IPC."""
+    script = tmp_path / "logger.py"
+    script.write_text(
+        textwrap.dedent(
+            """
+            import sys, json
+            sys.stderr.write("DEBUG: starting up\\n")
+            sys.stderr.flush()
+            sys.stdout.write(json.dumps({"kind":"ready","name":"logger"}) + "\\n")
+            sys.stdout.flush()
+            for line in sys.stdin:
+                env = json.loads(line)
+                sys.stderr.write(f"DEBUG: got event {env}\\n")
+                sys.stderr.flush()
+                sys.stdout.write(json.dumps({
+                    "kind":"reply",
+                    "correlation_id": env["correlation_id"],
+                    "reply": {"text":"ok","error":None,"media":[]}
+                }) + "\\n")
+                sys.stdout.flush()
+            """
+        )
+    )
+
+    worker = ProfileWorker(
+        name="logger", argv=[sys.executable, str(script)], env={}
+    )
+    await worker.start()
+    try:
+        # Several dispatches; if stderr were leaking into stdout IPC, the
+        # ProfileWorker reader would log warnings and the dispatches would
+        # never resolve to a reply envelope.
+        replies = await asyncio.gather(
+            worker.dispatch({"text": "1"}),
+            worker.dispatch({"text": "2"}),
+            worker.dispatch({"text": "3"}),
+        )
+        assert all(r["text"] == "ok" for r in replies)
+    finally:
+        await worker.stop()
+
+
+@pytest.mark.asyncio
 async def test_profile_worker_dispatch_after_stop_raises(tmp_path):
     script = tmp_path / "echo.py"
     script.write_text(ECHO_SCRIPT)
