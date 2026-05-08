@@ -53,19 +53,49 @@ class IPCPlatformAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.IPC)
         self._stdin = stdin if stdin is not None else sys.stdin
         self._stdout = stdout if stdout is not None else sys.stdout
+        self._pump_task: Optional[asyncio.Task] = None
 
     @property
     def name(self) -> str:
         return "ipc"
 
     async def connect(self) -> bool:
-        """Pump stdin lines until EOF, dispatching each to the handler."""
+        """Launch the stdin pump as a background task and return.
+
+        Returning immediately matches the platform-adapter contract used by
+        ``GatewayRunner.start()`` — adapters spin up their listener and
+        report success.  The worker entrypoint awaits ``self._pump_task``
+        (or :meth:`wait_until_disconnected`) to block until stdin EOF.
+        """
         self._mark_connected()
+        self._pump_task = asyncio.create_task(
+            self._pump_loop(), name="ipc_adapter_pump"
+        )
+        return True
+
+    async def disconnect(self) -> None:
+        """Cancel the pump task; safe to call repeatedly."""
+        if self._pump_task is not None and not self._pump_task.done():
+            self._pump_task.cancel()
+            try:
+                await self._pump_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._mark_disconnected()
+
+    async def wait_until_disconnected(self) -> None:
+        """Block until the pump task finishes (stdin EOF or cancellation)."""
+        if self._pump_task is None:
+            return
+        try:
+            await self._pump_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _pump_loop(self) -> None:
         loop = asyncio.get_event_loop()
         try:
             while True:
-                # ``readline`` blocks on real stdin pipes; offload to a
-                # thread so the event loop can keep doing other work.
                 line = await loop.run_in_executor(None, self._stdin.readline)
                 if not line:
                     break  # EOF
@@ -75,11 +105,6 @@ class IPCPlatformAdapter(BasePlatformAdapter):
                 await self._handle_line(line)
         finally:
             self._mark_disconnected()
-        return True
-
-    async def disconnect(self) -> None:
-        # No-op: ``connect()`` exits naturally when stdin closes.
-        self._mark_disconnected()
 
     async def get_chat_info(self, chat_id: str) -> dict:
         """Not meaningful for IPC — return a stub.

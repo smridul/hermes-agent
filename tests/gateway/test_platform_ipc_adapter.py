@@ -55,6 +55,7 @@ async def test_ipc_adapter_round_trip():
 
     adapter.set_message_handler(fake_handler)
     await adapter.connect()
+    await adapter.wait_until_disconnected()
 
     out_lines = [ln for ln in stdout.getvalue().splitlines() if ln.strip()]
     assert len(out_lines) == 1
@@ -98,6 +99,7 @@ async def test_ipc_adapter_handler_exception_emits_error_envelope():
 
     adapter.set_message_handler(crashing_handler)
     await adapter.connect()
+    await adapter.wait_until_disconnected()
 
     out_lines = [ln for ln in stdout.getvalue().splitlines() if ln.strip()]
     assert len(out_lines) == 1
@@ -140,6 +142,7 @@ async def test_ipc_adapter_handler_returning_none_emits_null_text():
 
     adapter.set_message_handler(silent)
     await adapter.connect()
+    await adapter.wait_until_disconnected()
 
     out_lines = [ln for ln in stdout.getvalue().splitlines() if ln.strip()]
     assert len(out_lines) == 1
@@ -157,9 +160,13 @@ async def test_ipc_adapter_drops_malformed_json():
     stdout = io.StringIO()
     cfg = PlatformConfig(extra={})
     adapter = IPCPlatformAdapter(cfg, stdin=stdin, stdout=stdout)
-    adapter.set_message_handler(lambda e: None)
+    async def silent(event):
+        return None
+
+    adapter.set_message_handler(silent)
 
     await adapter.connect()
+    await adapter.wait_until_disconnected()
     # No reply emitted for malformed lines.
     out_lines = [ln for ln in stdout.getvalue().splitlines() if ln.strip()]
     assert out_lines == []
