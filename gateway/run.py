@@ -961,6 +961,14 @@ class GatewayRunner:
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
+    # WhatsApp profile-routing defaults (None == feature disabled).
+    # Class-level so tests that build GatewayRunner via object.__new__()
+    # without running __init__ don't crash when stop() / _handle_message
+    # / _spawn_profile_workers reference these attributes.
+    profile_worker_manager: Optional[Any] = None
+    whatsapp_router: Optional[Any] = None
+    primary_profile_name: str = "default"
+    _profile_routing: Optional[Any] = None
     # Stale-code self-check defaults (see _detect_stale_code()).  Class-level
     # so tests that construct GatewayRunner via ``object.__new__`` without
     # running __init__ don't crash when _handle_message reads these.
@@ -3974,10 +3982,13 @@ class GatewayRunner:
             # Stop profile workers BEFORE the WhatsApp adapter so any
             # in-flight dispatch futures are rejected cleanly first; otherwise
             # workers could be reaped mid-write and leave dispatch tasks
-            # hanging on closed pipes.
-            if self.profile_worker_manager is not None:
+            # hanging on closed pipes.  ``getattr`` keeps this defensive
+            # against fake/partially-constructed gateway objects used in
+            # other test files (test_shutdown_cache_cleanup, etc.).
+            _worker_mgr = getattr(self, "profile_worker_manager", None)
+            if _worker_mgr is not None:
                 try:
-                    await self.profile_worker_manager.shutdown()
+                    await _worker_mgr.shutdown()
                     logger.info("✓ profile workers stopped")
                 except Exception as e:
                     logger.error("✗ profile worker shutdown error: %s", e)

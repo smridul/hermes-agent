@@ -377,6 +377,10 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
         (cfg.extra.get("client_id") or os.getenv("DINGTALK_CLIENT_ID"))
         and (cfg.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET"))
     ),
+    # IPC is the worker-side adapter for sender-based profile routing.
+    # No external auth — if the gateway has enabled it, it's "connected"
+    # by virtue of having an open stdin pipe.
+    Platform.IPC: lambda cfg: True,
 }
 
 
