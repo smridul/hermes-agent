@@ -81,6 +81,13 @@ if [ ! -f "$HERMES_HOME/SOUL.md" ]; then
     cp "$INSTALL_DIR/docker/SOUL.md" "$HERMES_HOME/SOUL.md"
 fi
 
+# Touch ~/.zshrc so zsh-newuser-install doesn't prompt on `su hermes`
+# or `docker exec -it … zsh`.  System-wide settings live in
+# /etc/zsh/zshrc.d/hermes.zsh; this file just suppresses the wizard.
+if [ ! -f "$HERMES_HOME/.zshrc" ]; then
+    : > "$HERMES_HOME/.zshrc"
+fi
+
 # Sync bundled skills (manifest-based so user edits are preserved)
 if [ -d "$INSTALL_DIR/skills" ]; then
     python3 "$INSTALL_DIR/tools/skills_sync.py"
