@@ -1153,6 +1153,78 @@ class GatewayRunner:
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
 
+        # ── WhatsApp sender-based profile routing (optional) ────────────
+        # When configured, ingress spawns one Hermes worker subprocess per
+        # non-primary profile listed in ``whatsapp.profile_routing.profiles``.
+        # Routed inbound WhatsApp messages are forwarded to the appropriate
+        # worker; replies travel back through ingress's WhatsApp adapter.
+        self._profile_routing = getattr(
+            self.config, "whatsapp_profile_routing", None
+        )
+        self.profile_worker_manager = None  # populated in start() if routing
+        self.whatsapp_router = None
+        self.primary_profile_name: str = self._resolve_primary_profile_name()
+        if self._profile_routing is not None:
+            from gateway.profile_worker_manager import ProfileWorkerManager
+            from gateway.whatsapp_router import WhatsAppRouter
+
+            self.profile_worker_manager = ProfileWorkerManager()
+            self.whatsapp_router = WhatsAppRouter(self._profile_routing)
+
+    def _resolve_primary_profile_name(self) -> str:
+        """Return the profile name corresponding to this gateway's HERMES_HOME.
+
+        Profiles live at ``<root>/profiles/<name>``.  If HERMES_HOME points
+        directly at the root (no profile subdir), returns ``"default"``.
+        """
+        try:
+            from hermes_constants import get_default_hermes_root, get_hermes_home
+            home = get_hermes_home().resolve()
+            root = (get_default_hermes_root() / "profiles").resolve()
+            try:
+                rel = home.relative_to(root)
+            except ValueError:
+                return "default"
+            parts = rel.parts
+            return parts[0] if parts else "default"
+        except Exception:
+            return "default"
+
+    async def _spawn_profile_workers(self) -> None:
+        """Spawn one ProfileWorker subprocess per non-primary profile.
+
+        Called from :meth:`start` when ``whatsapp_profile_routing`` is
+        configured.  The primary profile is handled in-process and is not
+        spawned as a worker.  Failures are logged at the manager level.
+        """
+        if self._profile_routing is None or self.profile_worker_manager is None:
+            return
+
+        from gateway.profile_worker_manager import WorkerSpec
+
+        worker_argv = [sys.executable, "-m", "hermes_cli.main", "profile-worker"]
+        specs: list[WorkerSpec] = []
+        for profile_name in self._profile_routing.profiles:
+            if profile_name == self.primary_profile_name:
+                continue
+            specs.append(
+                WorkerSpec(
+                    name=profile_name,
+                    argv=worker_argv + ["--name", profile_name],
+                    # Workers re-set HERMES_HOME themselves (see
+                    # hermes_cli/profile_worker_cli.py); the inherited env
+                    # is otherwise plumbed through verbatim.
+                    env={**os.environ},
+                )
+            )
+        if specs:
+            logger.info(
+                "Spawning %d profile worker subprocess(es): %s",
+                len(specs),
+                [s.name for s in specs],
+            )
+            await self.profile_worker_manager.start(specs)
+
 
     def _warn_if_docker_media_delivery_is_risky(self) -> None:
         """Warn when Docker-backed gateways lack an explicit export mount.
@@ -2774,7 +2846,18 @@ class GatewayRunner:
         enabled_platform_count = 0
         startup_nonretryable_errors: list[str] = []
         startup_retryable_errors: list[str] = []
-        
+
+        # ── Spawn profile worker subprocesses (if routing configured) ────
+        # Workers must be ready BEFORE any platform adapter accepts inbound
+        # messages, otherwise the first routed event would race against
+        # worker startup.  Workers for the primary profile are NOT spawned
+        # — primary handles its own messages in-process.
+        if (
+            self._profile_routing is not None
+            and self.profile_worker_manager is not None
+        ):
+            await self._spawn_profile_workers()
+
         # Initialize and connect each configured platform
         for platform, platform_config in self.config.platforms.items():
             if not platform_config.enabled:
@@ -3821,6 +3904,17 @@ class GatewayRunner:
                         _entry[0] if isinstance(_entry, tuple) else _entry
                     )
                     self._cleanup_agent_resources(_agent)
+
+            # Stop profile workers BEFORE the WhatsApp adapter so any
+            # in-flight dispatch futures are rejected cleanly first; otherwise
+            # workers could be reaped mid-write and leave dispatch tasks
+            # hanging on closed pipes.
+            if self.profile_worker_manager is not None:
+                try:
+                    await self.profile_worker_manager.shutdown()
+                    logger.info("✓ profile workers stopped")
+                except Exception as e:
+                    logger.error("✗ profile worker shutdown error: %s", e)
 
             for platform, adapter in list(self.adapters.items()):
                 try:
