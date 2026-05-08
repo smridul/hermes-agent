@@ -1225,6 +1225,72 @@ class GatewayRunner:
             )
             await self.profile_worker_manager.start(specs)
 
+    async def _dispatch_to_worker(
+        self, target_profile: str, event: MessageEvent
+    ) -> Optional[str]:
+        """Forward a routed WhatsApp event to the named profile worker.
+
+        Reply text is delivered through ingress's in-process WhatsApp
+        adapter; this method always returns ``None`` (the platform
+        adapter has nothing further to send).
+        """
+        if self.profile_worker_manager is None:
+            logger.error(
+                "profile_routing: dispatch requested for %r but no manager",
+                target_profile,
+            )
+            return None
+
+        from gateway.message_event_codec import encode_event
+
+        encoded = encode_event(event)
+        try:
+            reply = await self.profile_worker_manager.dispatch(
+                target_profile, encoded
+            )
+        except Exception as exc:
+            # MVP: silently drop on dispatch failure.  See spec §7 Q1.
+            logger.error(
+                "profile_routing: dispatch to worker %r failed: %s",
+                target_profile,
+                exc,
+            )
+            return None
+
+        text = reply.get("text") if isinstance(reply, dict) else None
+        error = reply.get("error") if isinstance(reply, dict) else None
+        if error:
+            logger.warning(
+                "profile_routing: worker %r returned error: %s",
+                target_profile,
+                error,
+            )
+            return None
+        if not text:
+            return None  # worker chose not to reply — nothing to send
+
+        adapter = self.adapters.get(Platform.WHATSAPP)
+        if adapter is None:
+            logger.error(
+                "profile_routing: WhatsApp adapter missing; cannot deliver reply"
+            )
+            return None
+        chat_id = event.source.chat_id if event.source else None
+        if not chat_id:
+            logger.error(
+                "profile_routing: event has no chat_id; cannot deliver reply"
+            )
+            return None
+        try:
+            await adapter.send(
+                chat_id, text, reply_to=event.message_id
+            )
+        except Exception as exc:
+            logger.error(
+                "profile_routing: WhatsApp adapter.send failed: %s", exc
+            )
+        return None
+
 
     def _warn_if_docker_media_delivery_is_risky(self) -> None:
         """Warn when Docker-backed gateways lack an explicit export mount.
@@ -4519,7 +4585,7 @@ class GatewayRunner:
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
-        
+
         This is the core message processing pipeline:
         1. Check user authorization
         2. Check for commands (/new, /reset, etc.)
@@ -4530,6 +4596,24 @@ class GatewayRunner:
         7. Return response
         """
         source = event.source
+
+        # ── WhatsApp sender-based profile routing ──────────────────────
+        # Inbound WhatsApp messages whose canonical sender id maps to a
+        # non-primary profile are forwarded to that profile's worker
+        # subprocess; the worker's reply is delivered back through the
+        # in-process WhatsApp adapter.  Unmapped senders fall through to
+        # the in-process pipeline below (default_profile == primary).
+        if (
+            source is not None
+            and source.platform == Platform.WHATSAPP
+            and self.whatsapp_router is not None
+            and self.profile_worker_manager is not None
+        ):
+            target_profile = self.whatsapp_router.resolve_profile(
+                event.canonical_sender_id or ""
+            )
+            if target_profile != self.primary_profile_name:
+                return await self._dispatch_to_worker(target_profile, event)
 
         # Stale-code self-check (Issue #17648).  A gateway that survives
         # ``hermes update`` keeps old modules cached in sys.modules; the
