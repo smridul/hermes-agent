@@ -1666,6 +1666,7 @@ _SESSION_EXPIRED_MARKERS: tuple = (
     "expired session",
     "session expired",
     "session not found",
+    "session terminated",
     "unknown session",
 )
 
