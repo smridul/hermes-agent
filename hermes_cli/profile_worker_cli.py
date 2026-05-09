@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 
 from hermes_constants import get_default_hermes_root
@@ -83,7 +84,7 @@ async def _run_worker(profile_name: str) -> int:
         load_gateway_config,
     )
     from gateway.platforms.ipc import IPCPlatformAdapter
-    from gateway.run import GatewayRunner
+    from gateway.run import GatewayRunner, _start_cron_ticker
 
     cfg: GatewayConfig
     try:
@@ -115,11 +116,30 @@ async def _run_worker(profile_name: str) -> int:
         await runner.stop()
         return 1
 
+    # Cron jobs created inside this profile live in the profile's own
+    # HERMES_HOME/cron/jobs.json.  The main gateway's ticker runs against
+    # the *primary* profile and won't see them, so each worker has to tick
+    # its own scheduler.  Mirrors the wiring in gateway.run.start_gateway.
+    cron_stop = threading.Event()
+    cron_thread = threading.Thread(
+        target=_start_cron_ticker,
+        args=(cron_stop,),
+        kwargs={
+            "adapters": runner.adapters,
+            "loop": asyncio.get_running_loop(),
+        },
+        daemon=True,
+        name=f"cron-ticker[{profile_name}]",
+    )
+    cron_thread.start()
+
     # Block until stdin closes (ingress shut us down) or the pump task
     # crashes for some other reason.
     try:
         await adapter.wait_until_disconnected()
     finally:
+        cron_stop.set()
+        cron_thread.join(timeout=5)
         try:
             await runner.stop()
         except Exception:
