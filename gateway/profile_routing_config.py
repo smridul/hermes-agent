@@ -32,6 +32,7 @@ class ProfileRoutingConfig:
     profiles: tuple[str, ...]
     default_profile: str
     sender_profile_map: dict[str, str] = field(default_factory=dict)
+    group_profile_map: dict[str, str] = field(default_factory=dict)
 
 
 def parse_profile_routing(raw: dict[str, Any] | None) -> Optional[ProfileRoutingConfig]:

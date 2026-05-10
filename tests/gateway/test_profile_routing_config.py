@@ -103,3 +103,23 @@ def test_sender_map_must_be_mapping():
                 "sender_profile_map": ["not", "a", "dict"],
             }
         )
+
+
+def test_dataclass_has_group_profile_map_default_empty():
+    """ProfileRoutingConfig accepts group_profile_map and defaults to empty dict."""
+    cfg = ProfileRoutingConfig(
+        profiles=("main",),
+        default_profile="main",
+        sender_profile_map={},
+    )
+    assert cfg.group_profile_map == {}
+
+
+def test_dataclass_accepts_group_profile_map():
+    cfg = ProfileRoutingConfig(
+        profiles=("main", "family"),
+        default_profile="main",
+        sender_profile_map={},
+        group_profile_map={"120363409860032836@g.us": "family"},
+    )
+    assert cfg.group_profile_map == {"120363409860032836@g.us": "family"}
