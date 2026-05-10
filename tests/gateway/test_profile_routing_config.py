@@ -123,3 +123,51 @@ def test_dataclass_accepts_group_profile_map():
         group_profile_map={"120363409860032836@g.us": "family"},
     )
     assert cfg.group_profile_map == {"120363409860032836@g.us": "family"}
+
+
+def test_parser_populates_group_profile_map():
+    cfg = parse_profile_routing(
+        {
+            "profiles": ["main", "family"],
+            "default_profile": "main",
+            "sender_profile_map": {},
+            "group_profile_map": {
+                "120363409860032836@g.us": "family",
+                "120363409999999999@g.us": "main",
+            },
+        }
+    )
+    assert cfg is not None
+    assert cfg.group_profile_map == {
+        "120363409860032836@g.us": "family",
+        "120363409999999999@g.us": "main",
+    }
+
+
+def test_parser_group_profile_map_optional():
+    """A config without group_profile_map parses with an empty group_profile_map."""
+    cfg = parse_profile_routing(
+        {
+            "profiles": ["main"],
+            "default_profile": "main",
+            "sender_profile_map": {},
+        }
+    )
+    assert cfg is not None
+    assert cfg.group_profile_map == {}
+
+
+def test_parser_allows_multiple_groups_to_same_profile():
+    cfg = parse_profile_routing(
+        {
+            "profiles": ["main", "family"],
+            "default_profile": "main",
+            "sender_profile_map": {},
+            "group_profile_map": {
+                "g1@g.us": "family",
+                "g2@g.us": "family",
+            },
+        }
+    )
+    assert cfg is not None
+    assert cfg.group_profile_map == {"g1@g.us": "family", "g2@g.us": "family"}

@@ -105,8 +105,35 @@ def parse_profile_routing(raw: dict[str, Any] | None) -> Optional[ProfileRouting
             )
         canonical_map[canonical] = target
 
+    raw_group_map = raw.get("group_profile_map")
+    if raw_group_map is None:
+        raw_group_map = {}
+    if not isinstance(raw_group_map, dict):
+        raise ProfileRoutingConfigError(
+            "profile_routing.group_profile_map must be a mapping"
+        )
+
+    group_map: dict[str, str] = {}
+    for raw_chat_id, target in raw_group_map.items():
+        if not isinstance(raw_chat_id, str) or not isinstance(target, str):
+            raise ProfileRoutingConfigError(
+                "group_profile_map keys and values must be strings"
+            )
+        chat_id = raw_chat_id.strip()
+        if not chat_id:
+            raise ProfileRoutingConfigError(
+                f"group_profile_map key {raw_chat_id!r} is empty after stripping"
+            )
+        if target not in profiles_tuple:
+            raise ProfileRoutingConfigError(
+                f"group_profile_map maps {raw_chat_id!r} to unknown profile "
+                f"{target!r} (not in profiles list)"
+            )
+        group_map[chat_id] = target
+
     return ProfileRoutingConfig(
         profiles=profiles_tuple,
         default_profile=default_profile,
         sender_profile_map=canonical_map,
+        group_profile_map=group_map,
     )
