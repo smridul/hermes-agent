@@ -80,3 +80,20 @@ async def test_failed_worker_start_tears_down_others(tmp_path):
         )
     # Manager state must be empty; no leaked workers.
     assert mgr.names == []
+
+
+def test_has_worker_returns_false_when_empty():
+    from gateway.profile_worker_manager import ProfileWorkerManager
+
+    mgr = ProfileWorkerManager()
+    assert mgr.has_worker("anything") is False
+
+
+def test_has_worker_returns_true_for_registered():
+    from gateway.profile_worker_manager import ProfileWorkerManager
+
+    mgr = ProfileWorkerManager()
+    # Bypass start() and inject a sentinel — has_worker is a pure registry check.
+    mgr._workers["family"] = object()
+    assert mgr.has_worker("family") is True
+    assert mgr.has_worker("ghost") is False

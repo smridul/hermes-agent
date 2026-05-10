@@ -76,3 +76,7 @@ class ProfileWorkerManager:
     @property
     def names(self) -> list[str]:
         return list(self._workers.keys())
+
+    def has_worker(self, profile_name: str) -> bool:
+        """True iff a worker is currently registered under ``profile_name``."""
+        return profile_name in self._workers
