@@ -76,6 +76,56 @@ Senders not listed in `sender_profile_map` are routed to
 `default_profile`. The default profile's existing `dm_policy` /
 `allow_from` / pairing rules then apply.
 
+## Group routing (chat-id based)
+
+In addition to `sender_profile_map`, you can bind a specific WhatsApp
+group to a profile via `group_profile_map`. Every message in that group
+that survives the inbound mention/free-response gating is handled by the
+bound profile, regardless of who sent it.
+
+```yaml
+whatsapp:
+  profile_routing:
+    profiles: ["default", "main", "family"]
+    default_profile: "default"
+    sender_profile_map:
+      "60123456789": "main"
+    group_profile_map:
+      "120363409860032836@g.us": "family"
+```
+
+### Precedence
+
+For a given inbound message:
+
+1. If the message is in a group AND the group's `chat_id` is in
+   `group_profile_map`, route to that profile.
+2. Otherwise consult `sender_profile_map`.
+3. Otherwise route to `default_profile`.
+
+Group binding is **exclusive**: when a group is mapped, the bound profile
+is the only legitimate target. If that profile's worker is unavailable
+at dispatch time, the message is dropped and an `ERROR` line of the form
+`group_routing: chat=<jid> target=<profile> worker_unavailable; dropping
+message` is logged. There is no fallback to `sender_profile_map` or
+`default_profile` for a bound group — silently degrading would re-create
+the security regression the routing feature exists to prevent.
+
+### Group `chat_id` format
+
+`group_profile_map` keys are matched **verbatim** against the bridge's
+`chat_id` for inbound messages. Standard WhatsApp groups use the
+`<id>@g.us` suffix; community/LID-only groups may use `<id>@lid`. There
+is no canonicalisation — copy the JID exactly as it appears in your
+gateway logs (`inbound message: ... chat=<jid>`).
+
+### Validation
+
+`group_profile_map` is validated at boot. A target profile that is not
+in `profiles`, a non-string key/value, or an empty key all raise
+`ProfileRoutingConfigError` and abort gateway start — same fail-closed
+posture as `sender_profile_map`.
+
 ## Limitations (MVP)
 
 - **Only WhatsApp DMs are routed.** Group messages always go to the
