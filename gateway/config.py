@@ -19,6 +19,8 @@ from enum import Enum
 from hermes_cli.config import get_hermes_home
 from utils import is_truthy_value
 
+from gateway.profile_routing_config import ProfileRoutingConfigError
+
 logger = logging.getLogger(__name__)
 
 
@@ -976,6 +978,12 @@ def load_gateway_config() -> GatewayConfig:
                 if "allow_bots" in feishu_cfg and not os.getenv("FEISHU_ALLOW_BOTS"):
                     os.environ["FEISHU_ALLOW_BOTS"] = str(feishu_cfg["allow_bots"]).lower()
 
+    except ProfileRoutingConfigError:
+        # Profile routing is a security boundary — silently falling back
+        # would let messages from restricted senders be processed by the
+        # in-process default profile, leaking its tools/MCP servers to
+        # numbers the operator intended to sandbox. Fail closed instead.
+        raise
     except Exception as e:
         logger.warning(
             "Failed to process config.yaml — falling back to .env / gateway.json values. "

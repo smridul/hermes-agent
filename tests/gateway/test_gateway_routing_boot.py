@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from gateway.profile_routing_config import ProfileRoutingConfig
+from gateway.profile_routing_config import ProfileRoutingConfig, ProfileRoutingConfigError
 
 
 def test_no_routing_config_means_no_worker_manager(tmp_path, monkeypatch):
@@ -77,6 +77,32 @@ def test_load_gateway_config_no_routing_block_works(tmp_path, monkeypatch):
 
     cfg = load_gateway_config()
     assert cfg.whatsapp_profile_routing is None
+
+
+def test_invalid_profile_routing_fails_closed(tmp_path, monkeypatch):
+    """A malformed ``whatsapp.profile_routing`` block must abort gateway boot.
+
+    Regression: a sender_profile_map entry pointing at a profile not in
+    the ``profiles`` list used to be swallowed by the broad except in
+    load_gateway_config, silently disabling routing — every restricted
+    sender then fell through to the in-process default profile, leaking
+    its tools/MCP servers. Routing is a security boundary; fail closed.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        """
+whatsapp:
+  profile_routing:
+    profiles: ["default", "main"]
+    default_profile: "default"
+    sender_profile_map:
+      "+15551234567": "ghost-profile"
+"""
+    )
+    from gateway.config import load_gateway_config
+
+    with pytest.raises(ProfileRoutingConfigError):
+        load_gateway_config()
 
 
 def test_primary_profile_name_falls_back_when_home_is_root(tmp_path, monkeypatch):
