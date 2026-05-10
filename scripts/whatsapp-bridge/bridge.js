@@ -64,7 +64,10 @@ function formatOutgoingMessage(message) {
 
 function normalizeWhatsAppId(value) {
   if (!value) return '';
-  return String(value).replace(':', '@');
+  // Strip Baileys' ":<device>" suffix (e.g. "14082287857:10@s.whatsapp.net" →
+  // "14082287857@s.whatsapp.net"). WhatsApp's contextInfo.participant and
+  // mentionedJid arrive without it, so bot identity must match the same shape.
+  return String(value).replace(/:\d+@/, '@');
 }
 
 function getMessageContent(msg) {

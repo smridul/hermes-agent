@@ -298,10 +298,11 @@ class WhatsAppAdapter(BasePlatformAdapter):
     def _normalize_whatsapp_id(value: Optional[str]) -> str:
         if not value:
             return ""
-        normalized = str(value).strip()
-        if ":" in normalized and "@" in normalized:
-            normalized = normalized.replace(":", "@", 1)
-        return normalized
+        # Strip Baileys' ":<device>" suffix from JIDs (e.g. "14082287857:10@s.whatsapp.net"
+        # → "14082287857@s.whatsapp.net"). Quoted-participant / mentioned-JID fields from
+        # WhatsApp arrive without it, so bot identity must be stripped to the same shape
+        # for reply-to-bot and mention comparisons.
+        return re.sub(r":\d+@", "@", str(value).strip())
 
     def _bot_ids_from_message(self, data: Dict[str, Any]) -> set[str]:
         bot_ids = set()
