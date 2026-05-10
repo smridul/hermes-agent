@@ -4608,23 +4608,44 @@ class GatewayRunner:
         """
         source = event.source
 
-        # ── WhatsApp sender-based profile routing ──────────────────────
-        # Inbound WhatsApp messages whose canonical sender id maps to a
-        # non-primary profile are forwarded to that profile's worker
-        # subprocess; the worker's reply is delivered back through the
-        # in-process WhatsApp adapter.  Unmapped senders fall through to
-        # the in-process pipeline below (default_profile == primary).
+        # ── WhatsApp profile routing ───────────────────────────────────
+        # Group-based routing takes precedence and is *exclusive*: a chat
+        # listed in group_profile_map binds to its target profile only —
+        # we never fall back to sender routing or default_profile from a
+        # bound group.  Sender-based routing (the existing path) handles
+        # DMs and unmapped groups.
         if (
             source is not None
             and source.platform == Platform.WHATSAPP
             and self.whatsapp_router is not None
             and self.profile_worker_manager is not None
         ):
-            target_profile = self.whatsapp_router.resolve_profile(
-                event.canonical_sender_id or ""
-            )
-            if target_profile != self.primary_profile_name:
-                return await self._dispatch_to_worker(target_profile, event)
+            group_target: Optional[str] = None
+            if source.chat_type == "group" and source.chat_id:
+                group_target = self.whatsapp_router.resolve_group(source.chat_id)
+
+            if group_target is not None:
+                # Group is exclusively bound — handle and return without
+                # consulting sender routing.
+                if group_target == self.primary_profile_name:
+                    # Bound to primary; fall through to in-process pipeline below.
+                    pass
+                elif self.profile_worker_manager.has_worker(group_target):
+                    return await self._dispatch_to_worker(group_target, event)
+                else:
+                    logger.error(
+                        "group_routing: chat=%s target=%s worker_unavailable; "
+                        "dropping message",
+                        source.chat_id,
+                        group_target,
+                    )
+                    return None
+            else:
+                target_profile = self.whatsapp_router.resolve_profile(
+                    event.canonical_sender_id or ""
+                )
+                if target_profile != self.primary_profile_name:
+                    return await self._dispatch_to_worker(target_profile, event)
 
         # Stale-code self-check (Issue #17648).  A gateway that survives
         # ``hermes update`` keeps old modules cached in sys.modules; the
