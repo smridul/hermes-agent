@@ -1687,6 +1687,20 @@ def _is_session_expired_error(exc: BaseException) -> bool:
     """
     if isinstance(exc, InterruptedError):
         return False
+    # When the MCP server-side disappears mid-session (e.g. container
+    # replacement during a Coolify deploy), the SDK's underlying anyio
+    # memory streams get torn down before ``MCPServerTask`` clears
+    # ``self.session``. The next ``call_tool`` then hits a closed/
+    # broken stream and ``send_request`` raises one of these from
+    # ``mcp/shared/session.py``'s ``await self._write_stream.send(...)``.
+    # These exceptions carry an empty message, so the substring match
+    # below would miss them. Detect by type so the recovery hook fires.
+    try:
+        import anyio
+        if isinstance(exc, (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream)):
+            return True
+    except ImportError:
+        pass
     # Exception messages vary across SDK versions + server
     # implementations, so match on a small allow-list of stable
     # substrings rather than exception type.  Kept narrow to avoid
@@ -2086,8 +2100,8 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
 
             _bump_server_error(server_name)
             logger.error(
-                "MCP tool %s/%s call failed: %s",
-                server_name, tool_name, exc,
+                "MCP tool %s/%s call failed: %s: %s",
+                server_name, tool_name, type(exc).__name__, exc,
             )
             return json.dumps({
                 "error": _sanitize_error(
@@ -2145,7 +2159,8 @@ def _make_list_resources_handler(server_name: str, tool_timeout: float):
             if recovered is not None:
                 return recovered
             logger.error(
-                "MCP %s/list_resources failed: %s", server_name, exc,
+                "MCP %s/list_resources failed: %s: %s",
+                server_name, type(exc).__name__, exc,
             )
             return json.dumps({
                 "error": _sanitize_error(
@@ -2205,7 +2220,8 @@ def _make_read_resource_handler(server_name: str, tool_timeout: float):
             if recovered is not None:
                 return recovered
             logger.error(
-                "MCP %s/read_resource failed: %s", server_name, exc,
+                "MCP %s/read_resource failed: %s: %s",
+                server_name, type(exc).__name__, exc,
             )
             return json.dumps({
                 "error": _sanitize_error(
@@ -2268,7 +2284,8 @@ def _make_list_prompts_handler(server_name: str, tool_timeout: float):
             if recovered is not None:
                 return recovered
             logger.error(
-                "MCP %s/list_prompts failed: %s", server_name, exc,
+                "MCP %s/list_prompts failed: %s: %s",
+                server_name, type(exc).__name__, exc,
             )
             return json.dumps({
                 "error": _sanitize_error(
@@ -2339,7 +2356,8 @@ def _make_get_prompt_handler(server_name: str, tool_timeout: float):
             if recovered is not None:
                 return recovered
             logger.error(
-                "MCP %s/get_prompt failed: %s", server_name, exc,
+                "MCP %s/get_prompt failed: %s: %s",
+                server_name, type(exc).__name__, exc,
             )
             return json.dumps({
                 "error": _sanitize_error(
