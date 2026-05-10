@@ -171,3 +171,63 @@ def test_parser_allows_multiple_groups_to_same_profile():
     )
     assert cfg is not None
     assert cfg.group_profile_map == {"g1@g.us": "family", "g2@g.us": "family"}
+
+
+def test_group_profile_map_unknown_target_raises():
+    with pytest.raises(ProfileRoutingConfigError, match="unknown profile"):
+        parse_profile_routing(
+            {
+                "profiles": ["main"],
+                "default_profile": "main",
+                "sender_profile_map": {},
+                "group_profile_map": {"g1@g.us": "ghost"},
+            }
+        )
+
+
+def test_group_profile_map_non_string_key_raises():
+    with pytest.raises(ProfileRoutingConfigError, match="must be strings"):
+        parse_profile_routing(
+            {
+                "profiles": ["main"],
+                "default_profile": "main",
+                "sender_profile_map": {},
+                "group_profile_map": {123: "main"},
+            }
+        )
+
+
+def test_group_profile_map_non_string_value_raises():
+    with pytest.raises(ProfileRoutingConfigError, match="must be strings"):
+        parse_profile_routing(
+            {
+                "profiles": ["main"],
+                "default_profile": "main",
+                "sender_profile_map": {},
+                "group_profile_map": {"g1@g.us": 42},
+            }
+        )
+
+
+def test_group_profile_map_empty_key_raises():
+    with pytest.raises(ProfileRoutingConfigError, match="empty"):
+        parse_profile_routing(
+            {
+                "profiles": ["main"],
+                "default_profile": "main",
+                "sender_profile_map": {},
+                "group_profile_map": {"   ": "main"},
+            }
+        )
+
+
+def test_group_profile_map_not_a_dict_raises():
+    with pytest.raises(ProfileRoutingConfigError, match="must be a mapping"):
+        parse_profile_routing(
+            {
+                "profiles": ["main"],
+                "default_profile": "main",
+                "sender_profile_map": {},
+                "group_profile_map": ["g1@g.us", "main"],
+            }
+        )
