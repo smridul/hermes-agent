@@ -866,6 +866,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
         image_url: str,
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
+        **kwargs,
     ) -> SendResult:
         """Download image URL to cache, send natively via bridge."""
         try:
