@@ -1289,14 +1289,39 @@ class GatewayRunner:
                 "profile_routing: event has no chat_id; cannot deliver reply"
             )
             return None
+        # Worker replies may embed MEDIA:<path> tags (e.g. from the TTS
+        # tool) and [[audio_as_voice]] directives.  The non-routed pipeline
+        # extracts these in gateway/platforms/base.py and delivers them as
+        # native attachments; the IPC path bypassed that, so the raw tag
+        # ended up sent as text.  Mirror the same flow here: extract media,
+        # deliver native attachments, then send the cleaned residual text.
+        text_clean = text
         try:
-            await adapter.send(
-                chat_id, text, reply_to=event.message_id
+            _, text_clean = adapter.extract_media(text)
+            text_clean = text_clean.replace("[[audio_as_voice]]", "").strip()
+            text_clean = re.sub(r"MEDIA:\s*\S+", "", text_clean).strip()
+        except Exception as e:
+            logger.warning(
+                "profile_routing: media extraction failed: %s", e
             )
-        except Exception as exc:
-            logger.error(
-                "profile_routing: WhatsApp adapter.send failed: %s", exc
-            )
+
+        if "MEDIA:" in text or "[[audio_as_voice]]" in text:
+            try:
+                await self._deliver_media_from_response(text, event, adapter)
+            except Exception as e:
+                logger.warning(
+                    "profile_routing: media delivery failed: %s", e
+                )
+
+        if text_clean:
+            try:
+                await adapter.send(
+                    chat_id, text_clean, reply_to=event.message_id
+                )
+            except Exception as exc:
+                logger.error(
+                    "profile_routing: WhatsApp adapter.send failed: %s", exc
+                )
         return None
 
 
