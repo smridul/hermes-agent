@@ -1289,15 +1289,17 @@ class GatewayRunner:
                 "profile_routing: event has no chat_id; cannot deliver reply"
             )
             return None
-        # Worker replies may embed MEDIA:<path> tags (e.g. from the TTS
-        # tool) and [[audio_as_voice]] directives.  The non-routed pipeline
-        # extracts these in gateway/platforms/base.py and delivers them as
-        # native attachments; the IPC path bypassed that, so the raw tag
-        # ended up sent as text.  Mirror the same flow here: extract media,
-        # deliver native attachments, then send the cleaned residual text.
+        # Worker replies may embed MEDIA:<path> tags (TTS), markdown image
+        # URLs (![alt](https://…)) and [[audio_as_voice]] directives.  The
+        # non-routed pipeline in gateway/platforms/base.py extracts these
+        # and ships them as native attachments; the IPC path bypassed that
+        # entirely, so raw tags / URLs ended up sent as plain text.  Mirror
+        # the same flow here.
         text_clean = text
+        images: list = []
         try:
-            _, text_clean = adapter.extract_media(text)
+            _, text_clean = adapter.extract_media(text_clean)
+            images, text_clean = adapter.extract_images(text_clean)
             text_clean = text_clean.replace("[[audio_as_voice]]", "").strip()
             text_clean = re.sub(r"MEDIA:\s*\S+", "", text_clean).strip()
         except Exception as e:
@@ -1305,13 +1307,25 @@ class GatewayRunner:
                 "profile_routing: media extraction failed: %s", e
             )
 
-        if "MEDIA:" in text or "[[audio_as_voice]]" in text:
+        if images:
             try:
-                await self._deliver_media_from_response(text, event, adapter)
+                await adapter.send_multiple_images(
+                    chat_id=chat_id,
+                    images=images,
+                )
             except Exception as e:
                 logger.warning(
-                    "profile_routing: media delivery failed: %s", e
+                    "profile_routing: image delivery failed: %s", e
                 )
+
+        # Always invoke media delivery — _deliver_media_from_response is a
+        # no-op when no MEDIA: tags or bare local file paths are present.
+        try:
+            await self._deliver_media_from_response(text, event, adapter)
+        except Exception as e:
+            logger.warning(
+                "profile_routing: media delivery failed: %s", e
+            )
 
         if text_clean:
             try:
