@@ -1874,6 +1874,21 @@ def terminal_tool(
                     "status": "blocked"
                 }, ensure_ascii=False)
 
+        # Sandbox: wrap the command in bwrap when running locally inside a
+        # profile worker with HERMES_SANDBOX=strict.  No-op outside that
+        # configuration (and when bwrap isn't usable on the host).  Must
+        # run AFTER the dangerous-command guards so they see the original.
+        from tools import _sandbox as _sb
+        sandbox_workdir_err = _sb.check_path(workdir) if workdir else None
+        if sandbox_workdir_err:
+            return json.dumps({
+                "output": "",
+                "exit_code": -1,
+                "error": sandbox_workdir_err,
+                "status": "blocked",
+            }, ensure_ascii=False)
+        command = _sb.maybe_wrap_command(command, env_type)
+
         # Prepare command for execution
         pty_disabled_reason = None
         effective_pty = pty

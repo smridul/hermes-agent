@@ -15,7 +15,7 @@ from tools.file_operations import (
     normalize_read_pagination,
     normalize_search_pagination,
 )
-from tools import file_state
+from tools import _sandbox, file_state
 from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
@@ -449,6 +449,12 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
     try:
         offset, limit = normalize_read_pagination(offset, limit)
 
+        # ── Sandbox path guard ────────────────────────────────────────
+        # No-op outside profile-worker sandbox mode.
+        sandbox_err = _sandbox.check_path(path)
+        if sandbox_err:
+            return json.dumps({"error": sandbox_err}, ensure_ascii=False)
+
         # ── Device path guard ─────────────────────────────────────────
         # Block paths that would hang the process (infinite output,
         # blocking on input).  Pure path check — no I/O.
@@ -792,6 +798,9 @@ def _check_file_staleness(filepath: str, task_id: str) -> str | None:
 
 def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
     """Write content to a file."""
+    sandbox_err = _sandbox.check_path(path)
+    if sandbox_err:
+        return tool_error(sandbox_err)
     sensitive_err = _check_sensitive_path(path, task_id)
     if sensitive_err:
         return tool_error(sensitive_err)
@@ -859,6 +868,9 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
         import re as _re
         for _m in _re.finditer(r'^\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+)$', patch, _re.MULTILINE):
             _paths_to_check.append(_m.group(1).strip())
+    sandbox_err = _sandbox.check_paths(_paths_to_check)
+    if sandbox_err:
+        return tool_error(sandbox_err)
     for _p in _paths_to_check:
         sensitive_err = _check_sensitive_path(_p, task_id)
         if sensitive_err:
@@ -949,6 +961,9 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
                 task_id: str = "default") -> str:
     """Search for content or files."""
     try:
+        sandbox_err = _sandbox.check_path(path)
+        if sandbox_err:
+            return json.dumps({"error": sandbox_err}, ensure_ascii=False)
         offset, limit = normalize_search_pagination(offset, limit)
 
         # Track searches to detect *consecutive* repeated search loops.

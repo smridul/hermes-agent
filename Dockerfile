@@ -15,7 +15,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential curl nodejs npm python3 ripgrep ffmpeg gcc python3-dev libffi-dev procps git openssh-client docker-cli tini tmux \
-    vim less bash-completion \
+    vim less bash-completion bubblewrap \
     zsh zsh-autosuggestions zsh-syntax-highlighting fzf && \
     rm -rf /var/lib/apt/lists/*
 

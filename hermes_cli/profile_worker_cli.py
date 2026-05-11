@@ -46,6 +46,29 @@ def resolve_profile_path(profile_name: str) -> Path:
     return candidate
 
 
+def _apply_sandbox_env(profile_path: Path) -> None:
+    """Read ``sandbox: strict|off`` from the profile's config.yaml and
+    export ``HERMES_SANDBOX`` so the tool layer sees it on first import.
+
+    Must run AFTER ``HERMES_HOME`` is set and BEFORE any ``tools`` import.
+    Silent default-off on parse failure — the worker should boot even
+    when its config.yaml has unrelated YAML errors; the sandbox just
+    won't activate.
+    """
+    config_path = profile_path / "config.yaml"
+    if not config_path.is_file():
+        return
+    try:
+        import yaml
+        with config_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:
+        return
+    mode = str(data.get("sandbox", "")).strip().lower()
+    if mode == "strict":
+        os.environ["HERMES_SANDBOX"] = "strict"
+
+
 def _emit_ready(name: str) -> None:
     """Write the readiness envelope to stdout so ingress knows we're up."""
     sys.stdout.write(json.dumps({"kind": "ready", "name": name}) + "\n")
@@ -59,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
 
     profile_path = resolve_profile_path(args.name)
     os.environ["HERMES_HOME"] = str(profile_path)
+    _apply_sandbox_env(profile_path)
 
     # All worker logging goes to stderr.  Stdout is reserved for the IPC
     # JSON channel; any stray writes to stdout would corrupt it.

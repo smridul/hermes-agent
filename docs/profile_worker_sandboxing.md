@@ -1,7 +1,8 @@
 # Profile worker filesystem sandboxing — design note
 
-Status: **proposed, not implemented**
+Status: **Layer 1 shipped; Layer 2 wired but no-op until Coolify config change**
 Captured: 2026-05-11
+Updated: 2026-05-11 (Layer 1 + Layer 2 code landed; Layer 2 gates on bwrap availability)
 
 ## The ask
 
@@ -138,3 +139,39 @@ Total: ~250 LoC across 4-5 files.
 - Network policy (egress restrictions per profile).
 - Seccomp filter beyond what bwrap provides.
 - Memory/CPU quotas per worker.
+
+## Activation checklist (operator-facing)
+
+The code path is live but inert by default.  To turn it on for a profile:
+
+1. **Per-profile config** — add `sandbox: strict` to the top level of
+   `/data/hermes-agent/profiles/<name>/config.yaml`.  Restart the
+   profile worker (gateway respawns it on next message).  After
+   restart, the worker's `agent.log` will contain
+   `"filesystem sandbox active for profile '<name>' — allowlist: ..."`.
+
+   At this point **Layer 1 is live**: file_tools (read, write, patch,
+   search_files) reject any path that doesn't resolve under
+   `$HERMES_HOME` or `/tmp/hermes-<name>`.
+
+2. **Container security option (for Layer 2)** — in Coolify, add to the
+   `eureka-hermes` service:
+   ```
+   security_opt:
+     - seccomp=unconfined
+   ```
+   (or, more permissive: `cap_add: [SYS_ADMIN]`.)  Redeploy.  Verify
+   from a host shell:
+   ```
+   docker exec eureka-hermes bwrap --unshare-user \
+     --ro-bind /usr /usr /bin/true && echo OK
+   ```
+   When this prints `OK`, Layer 2 activates automatically on the next
+   profile-worker spawn.  Until then the bwrap probe at worker startup
+   fails and `tools._sandbox.maybe_wrap_command` returns the command
+   unwrapped — Layer 1 still applies.
+
+3. **Verifying Layer 2 is live** — inside a sandboxed worker, ask the
+   agent to run `ls /data/hermes-agent/profiles/default` via terminal.
+   It should fail with "No such file or directory" because the other
+   profile's dir is no longer in the mount namespace.

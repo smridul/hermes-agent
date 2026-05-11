@@ -161,14 +161,58 @@ through — out of scope for the first patch.
 
 ---
 
+## Completed this session (2026-05-11): Profile-worker filesystem sandbox
+
+Shipped Layer 1 + Layer 2 code in a single pass. Layer 2 is no-op until
+the container is reconfigured (see "Activation" below).
+
+**Files changed:**
+- `tools/_sandbox.py` *(new)* — `enabled()`, `check_path()`,
+  `check_paths()`, `bwrap_supported()`, `maybe_wrap_command()`. Single
+  source of truth for allowlist + bwrap argv.
+- `tools/file_tools.py` — guards at top of `read_file_tool`,
+  `write_file_tool`, `patch_tool` (covers V4A multi-file too via
+  `_paths_to_check`), and `search_tool`.
+- `tools/terminal_tool.py` — `maybe_wrap_command(cmd, env_type)` after
+  the dangerous-command guards, before bg/fg branch. Also guards
+  `workdir` against the allowlist.
+- `hermes_cli/profile_worker_cli.py` — `_apply_sandbox_env()` reads
+  `sandbox: strict` from the profile's `config.yaml` and exports
+  `HERMES_SANDBOX=strict` before any tool import.
+- `Dockerfile` — added `bubblewrap` to the apt install list.
+- `docs/profile_worker_sandboxing.md` — status header + operator
+  activation checklist.
+- `tests/tools/test_sandbox.py` *(new)* — 19 tests covering enabled
+  predicate, path acceptance/rejection (incl. symlink + `..` escapes),
+  Layer 2 no-op decisions, and e2e through `read/write/search_files`.
+
+**Verification (local):**
+- `scripts/run_tests.sh tests/tools/test_sandbox.py` — 19/19 pass.
+- `scripts/run_tests.sh tests/tools/test_file_tools.py tests/tools/test_terminal_tool.py` — 37/37 pass (no regression with sandbox off).
+- `scripts/run_tests.sh tests/hermes_cli/test_profile_worker_cli.py tests/gateway/test_profile_worker*.py` — 12/12 pass.
+
+**Container blocker (Layer 2 only):** Verified from the VM that
+`eureka-hermes` runs with `CapAdd=[]`, `SecurityOpt=[]`,
+`Privileged=false`. `bwrap --unshare-user ...` fails inside the
+container ("No permissions to create new namespace") because Docker's
+default seccomp profile blocks the user-namespace clone syscall. The
+`bwrap_supported()` probe detects this at worker startup and falls back
+to no-op wrapping — Layer 1 still applies; nothing breaks.
+
+**Activation when ready (operator):**
+1. Add `sandbox: strict` to a non-primary profile's
+   `/data/hermes-agent/profiles/<name>/config.yaml`. Restart that
+   worker (gateway respawns on next message). Layer 1 is live; check
+   the worker's `agent.log` for the `"filesystem sandbox active"`
+   line.
+2. To activate Layer 2: in Coolify, add
+   `security_opt: ["seccomp=unconfined"]` (or `cap_add: ["SYS_ADMIN"]`)
+   to the `eureka-hermes` service; redeploy; verify with
+   `docker exec eureka-hermes bwrap --unshare-user --ro-bind /usr /usr /bin/true`.
+   The next worker spawn picks it up automatically.
+
 ## Deferred features (not yet scheduled)
 
-- **Profile-worker filesystem sandboxing** — design captured in
-  `docs/profile_worker_sandboxing.md`. Goal: scope each worker's
-  terminal + file tools to its own `$HERMES_HOME` + per-profile
-  `/tmp` scratch, blocking access to other profiles and the default
-  profile. Plan is Layer 1 (Python path guard, ~50 LoC) + Layer 2
-  (bwrap jail around `terminal_tool`, ~20 LoC). Container needs
-  `bubblewrap` apt package and `SYS_ADMIN`/`seccomp=unconfined`
-  capability — verify on the Coolify-managed container before commit.
-  See doc for the file-by-file impact list and open questions.
+- **Coolify config change** for `seccomp=unconfined` on eureka-hermes.
+  Code is ready; only the ops flip is outstanding. See activation steps
+  above.
