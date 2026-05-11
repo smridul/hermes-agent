@@ -100,6 +100,20 @@ async def _run_worker(profile_name: str) -> int:
     # ingress process owns the WhatsApp bridge and forwards events here.
     cfg.platforms = {Platform.IPC: PlatformConfig(enabled=True)}
 
+    # MCP tool discovery — must run before runner.start() so per-profile
+    # mcp_servers declared in <profile>/config.yaml are registered for this
+    # worker.  Run in an executor: discover_mcp_tools() blocks up to 120s
+    # waiting on slow MCP servers, and stalling the loop thread would
+    # freeze IPC heartbeats.  Mirrors gateway/run.py:14101-14112.
+    try:
+        from tools.mcp_tool import discover_mcp_tools
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, discover_mcp_tools)
+    except Exception:
+        logger.exception(
+            "profile-worker[%s]: MCP tool discovery failed", profile_name,
+        )
+
     runner = GatewayRunner(cfg)
     started = await runner.start()
     if not started:
@@ -145,6 +159,16 @@ async def _run_worker(profile_name: str) -> int:
         except Exception:
             logger.exception(
                 "profile-worker[%s]: error during runner.stop()", profile_name
+            )
+        # Close MCP server connections held by this worker (symmetric with
+        # the discover_mcp_tools() call above).  Mirrors gateway/run.py:14147.
+        try:
+            from tools.mcp_tool import shutdown_mcp_servers
+            shutdown_mcp_servers()
+        except Exception:
+            logger.exception(
+                "profile-worker[%s]: error during shutdown_mcp_servers()",
+                profile_name,
             )
     return 0
 
