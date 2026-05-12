@@ -124,7 +124,9 @@ all = [
   "hermes-agent[dingtalk]",
   "hermes-agent[feishu]",
   "hermes-agent[google]",
-  "hermes-agent[mistral]",
+  # [mistral] excluded: the `mistralai` package on PyPI is quarantined
+  # (zero installable versions), which fails `pip install -e .[all]`.
+  # Install the [mistral] extra explicitly once PyPI unblocks it.
   "hermes-agent[bedrock]",
   "hermes-agent[web]",
 ]
