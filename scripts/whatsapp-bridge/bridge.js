@@ -92,6 +92,16 @@ function getContextInfo(messageContent) {
   return {};
 }
 
+function getBodyFromContent(content) {
+  if (!content || typeof content !== 'object') return '';
+  if (content.conversation) return content.conversation;
+  if (content.extendedTextMessage?.text) return content.extendedTextMessage.text;
+  if (content.imageMessage?.caption) return content.imageMessage.caption;
+  if (content.videoMessage?.caption) return content.videoMessage.caption;
+  if (content.documentMessage?.caption) return content.documentMessage.caption;
+  return '';
+}
+
 mkdirSync(SESSION_DIR, { recursive: true });
 
 // Build LID → phone reverse map from session files (lid-mapping-{phone}.json)
@@ -247,6 +257,9 @@ async function startSocket() {
       const contextInfo = getContextInfo(messageContent);
       const mentionedIds = Array.from(new Set((contextInfo?.mentionedJid || []).map(normalizeWhatsAppId).filter(Boolean)));
       const quotedParticipant = normalizeWhatsAppId(contextInfo?.participant || contextInfo?.remoteJid || '');
+      const quotedMessage = contextInfo?.quotedMessage || null;
+      const quotedMessageId = contextInfo?.stanzaId || '';
+      const quotedText = getBodyFromContent(quotedMessage);
 
       // Extract message body
       let body = '';
@@ -321,6 +334,73 @@ async function startSocket() {
         }
       }
 
+      // If the trigger message carries no media of its own but is a reply to
+      // a message that does (forwarded file, prior upload, etc.), re-download
+      // the quoted media via the mediaKey carried in contextInfo.quotedMessage.
+      // Without this, "@bot read this" replied to a forwarded file delivers
+      // a text-only event to the agent.
+      if (!hasMedia && quotedMessage && quotedMessageId) {
+        const quotedStub = {
+          key: {
+            remoteJid: chatId,
+            id: quotedMessageId,
+            participant: contextInfo?.participant || undefined,
+            fromMe: false,
+          },
+          message: quotedMessage,
+        };
+        try {
+          if (quotedMessage.imageMessage) {
+            const im = quotedMessage.imageMessage;
+            const buf = await downloadMediaMessage(quotedStub, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+            const mime = im.mimetype || 'image/jpeg';
+            const extMap = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif' };
+            const ext = extMap[mime] || '.jpg';
+            mkdirSync(IMAGE_CACHE_DIR, { recursive: true });
+            const filePath = path.join(IMAGE_CACHE_DIR, `img_${randomBytes(6).toString('hex')}${ext}`);
+            writeFileSync(filePath, buf);
+            mediaUrls.push(filePath);
+            hasMedia = true;
+            mediaType = 'image';
+          } else if (quotedMessage.videoMessage) {
+            const vm = quotedMessage.videoMessage;
+            const buf = await downloadMediaMessage(quotedStub, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+            const mime = vm.mimetype || 'video/mp4';
+            const ext = mime.includes('mp4') ? '.mp4' : '.mkv';
+            mkdirSync(DOCUMENT_CACHE_DIR, { recursive: true });
+            const filePath = path.join(DOCUMENT_CACHE_DIR, `vid_${randomBytes(6).toString('hex')}${ext}`);
+            writeFileSync(filePath, buf);
+            mediaUrls.push(filePath);
+            hasMedia = true;
+            mediaType = 'video';
+          } else if (quotedMessage.audioMessage || quotedMessage.pttMessage) {
+            const am = quotedMessage.pttMessage || quotedMessage.audioMessage;
+            const buf = await downloadMediaMessage(quotedStub, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+            const mime = am.mimetype || 'audio/ogg';
+            const ext = mime.includes('ogg') ? '.ogg' : mime.includes('mp4') ? '.m4a' : '.ogg';
+            mkdirSync(AUDIO_CACHE_DIR, { recursive: true });
+            const filePath = path.join(AUDIO_CACHE_DIR, `aud_${randomBytes(6).toString('hex')}${ext}`);
+            writeFileSync(filePath, buf);
+            mediaUrls.push(filePath);
+            hasMedia = true;
+            mediaType = quotedMessage.pttMessage ? 'ptt' : 'audio';
+          } else if (quotedMessage.documentMessage) {
+            const dm = quotedMessage.documentMessage;
+            const fileName = dm.fileName || 'document';
+            const buf = await downloadMediaMessage(quotedStub, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+            mkdirSync(DOCUMENT_CACHE_DIR, { recursive: true });
+            const safeFileName = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, '_');
+            const filePath = path.join(DOCUMENT_CACHE_DIR, `doc_${randomBytes(6).toString('hex')}_${safeFileName}`);
+            writeFileSync(filePath, buf);
+            mediaUrls.push(filePath);
+            hasMedia = true;
+            mediaType = 'document';
+          }
+        } catch (err) {
+          console.error('[bridge] Failed to download quoted media:', err.message);
+        }
+      }
+
       // For media without caption, use a placeholder so the API message is never empty
       if (hasMedia && !body) {
         body = `[${mediaType} received]`;
@@ -359,6 +439,8 @@ async function startSocket() {
         mediaUrls,
         mentionedIds,
         quotedParticipant,
+        quotedMessageId,
+        quotedText,
         botIds,
         timestamp: msg.messageTimestamp,
       };
