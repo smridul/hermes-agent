@@ -1896,7 +1896,28 @@ def _run_on_mcp_loop(coro, timeout: float = 30):
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return future.result(timeout=0)
+                # Cancel the coroutine so it doesn't keep running on the
+                # MCP loop after we surface the timeout.  Without this,
+                # a `_call()` that hung past `tool_timeout` stays alive
+                # forever holding `server._rpc_lock`, wedging every
+                # subsequent tool call and the reconnect's
+                # `_discover_tools` until the gateway is restarted.
+                # Observed 2026-05-15 against eureka-mcp during a
+                # Coolify container swap.
+                if not future.done():
+                    future.cancel()
+                try:
+                    return future.result(timeout=0)
+                except concurrent.futures.CancelledError:
+                    # The cancel we just requested already landed.  Surface
+                    # this as a timeout: it's the contract the rest of the
+                    # module expects on deadline expiry, and
+                    # `concurrent.futures.CancelledError` is BaseException
+                    # in 3.8+ so `except Exception` clauses upstream would
+                    # let it escape uncaught.
+                    raise concurrent.futures.TimeoutError(
+                        f"MCP call exceeded {timeout:.1f}s deadline"
+                    ) from None
             wait_timeout = min(wait_timeout, remaining)
 
         try:
