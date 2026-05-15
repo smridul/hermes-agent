@@ -25,3 +25,26 @@ files that may have been swept by the host's cleanup — verify
 `existsSync(cachedPath)` before reusing.
 
 Out of scope until needed; current behavior is correct, just suboptimal.
+
+## Session Branching / Checkpoints
+
+Save and restore conversation state at any point. Branch off to explore
+alternatives without losing progress.
+
+What other agents do:
+- Pi: full branching — create branches from any point in conversation,
+  branch summary entries, parent session tracking for tree-like session
+  structures.
+- Cline: checkpoints — workspace snapshots at each step with
+  Compare/Restore UI.
+- OpenCode: git-backed workspace snapshots per step, with weekly gc.
+
+Our approach:
+- `checkpoint` tool: saves current message history + working directory
+  state as a named snapshot.
+- `restore` tool: rolls back to a named checkpoint.
+- Stored in `~/.hermes/checkpoints/<session_id>/<name>.json`.
+- For file changes: git stash or tar snapshot of working directory.
+- Useful for: "let me try approach A, and if it doesn't work, roll back
+  and try B".
+- Later: full branching with tree visualization.
