@@ -1,6 +1,6 @@
 ---
 name: hue-cloud
-description: "Control Philips Hue lights, scenes, rooms remotely via the Hue Remote API (cloud) — no LAN access to the bridge required."
+description: "Control Philips Hue lights, scenes, rooms, dim/brighten/color — works from anywhere via the Philips Hue cloud (Remote API). Default skill for Hue control on cloud/VM/remote Hermes deployments where the bridge isn't on the same LAN."
 version: 1.0.0
 author: community
 license: MIT
