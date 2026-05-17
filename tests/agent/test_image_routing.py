@@ -127,7 +127,9 @@ class TestBuildNativeContentParts:
         parts, skipped = build_native_content_parts("hello", [str(img)])
         assert skipped == []
         assert len(parts) == 2
-        assert parts[0] == {"type": "text", "text": "hello"}
+        assert parts[0]["type"] == "text"
+        assert parts[0]["text"].startswith("hello")
+        assert str(img) in parts[0]["text"]
         assert parts[1]["type"] == "image_url"
         assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
@@ -139,7 +141,8 @@ class TestBuildNativeContentParts:
         # Even with empty user text, we insert a neutral prompt so the turn
         # isn't just pixels.
         assert parts[0]["type"] == "text"
-        assert parts[0]["text"] == "What do you see in this image?"
+        assert parts[0]["text"].startswith("What do you see in this image?")
+        assert str(img) in parts[0]["text"]
         assert parts[1]["type"] == "image_url"
 
     def test_missing_file_is_skipped(self, tmp_path: Path):
@@ -157,6 +160,8 @@ class TestBuildNativeContentParts:
         assert skipped == []
         image_parts = [p for p in parts if p.get("type") == "image_url"]
         assert len(image_parts) == 2
+        assert str(img1) in parts[0]["text"]
+        assert str(img2) in parts[0]["text"]
 
     def test_mime_inference_jpg(self, tmp_path: Path):
         img = tmp_path / "photo.jpg"

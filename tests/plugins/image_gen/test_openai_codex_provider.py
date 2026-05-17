@@ -9,6 +9,7 @@ endpoint.
 from __future__ import annotations
 
 import importlib
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -198,6 +199,68 @@ class TestGenerate:
         assert tool["output_format"] == "png"
         assert tool["background"] == "opaque"
         assert tool["partial_images"] == 1
+        assert "action" not in tool
+
+    def test_edit_request_includes_source_image_and_action(self, provider, monkeypatch, tmp_path):
+        monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: "codex-token")
+
+        src = tmp_path / "portrait.png"
+        src.write_bytes(bytes.fromhex(_PNG_HEX))
+        captured = {}
+
+        def _stream(**kwargs):
+            captured.update(kwargs)
+            output_item = SimpleNamespace(
+                type="image_generation_call",
+                status="generating",
+                id="ig_edit",
+                result=_b64_png(),
+            )
+            done_event = SimpleNamespace(type="response.output_item.done", item=output_item)
+            final_response = SimpleNamespace(output=[], status="completed", output_text="")
+            return _FakeStream([done_event], final_response)
+
+        fake_client = SimpleNamespace(responses=SimpleNamespace(stream=_stream))
+        monkeypatch.setattr(codex_plugin, "_build_codex_client", lambda: fake_client)
+
+        result = provider.generate(
+            "Turn this exact portrait into a clean cartoon avatar",
+            aspect_ratio="square",
+            source_images=[str(src)],
+        )
+
+        assert result["success"] is True
+        assert result["edit"] is True
+
+        content = captured["input"][0]["content"]
+        assert content[0] == {
+            "type": "input_text",
+            "text": "Turn this exact portrait into a clean cartoon avatar",
+        }
+        assert content[1]["type"] == "input_image"
+        assert content[1]["image_url"].startswith("data:image/png;base64,")
+        encoded = content[1]["image_url"].split(",", 1)[1]
+        assert base64.b64decode(encoded) == bytes.fromhex(_PNG_HEX)
+
+        tool = captured["tools"][0]
+        assert tool["type"] == "image_generation"
+        assert tool["model"] == "gpt-image-2"
+        assert tool["size"] == "1024x1024"
+        assert tool["quality"] == "medium"
+        assert tool["action"] == "edit"
+
+    def test_missing_source_image_returns_invalid_argument(self, provider, monkeypatch, tmp_path):
+        monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: "codex-token")
+        monkeypatch.setattr(codex_plugin, "_build_codex_client", lambda: None)
+
+        result = provider.generate(
+            "Make this a cartoon",
+            source_images=[str(tmp_path / "missing.png")],
+        )
+
+        assert result["success"] is False
+        assert result["error_type"] == "invalid_argument"
+        assert "Source image not found" in result["error"]
 
     def test_partial_image_event_used_when_done_missing(self, provider, monkeypatch):
         """If the stream never emits output_item.done, fall back to the

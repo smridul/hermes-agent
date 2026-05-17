@@ -136,6 +136,12 @@ class TestGenerate:
         assert result["success"] is False
         assert result["error_type"] == "auth_required"
 
+    def test_source_images_returns_unsupported_feature(self, provider):
+        result = provider.generate("make this a cartoon", source_images=["/tmp/source.png"])
+        assert result["success"] is False
+        assert result["error_type"] == "unsupported_feature"
+        assert "openai-codex" in result["error"]
+
     def test_b64_saves_to_cache(self, provider, tmp_path):
         import base64
         png_bytes = bytes.fromhex(_PNG_HEX)

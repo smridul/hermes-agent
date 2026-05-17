@@ -854,11 +854,15 @@ from tools.registry import registry, tool_error
 IMAGE_GENERATE_SCHEMA = {
     "name": "image_generate",
     "description": (
-        "Generate high-quality images from text prompts. The underlying "
+        "Generate high-quality images from text prompts, or directly edit "
+        "user-attached/source images when `source_images` is provided. The underlying "
         "backend (FAL, OpenAI, etc.) and model are user-configured and not "
         "selectable by the agent. Returns either a URL or an absolute file "
         "path in the `image` field; display it with markdown "
-        "![description](url-or-path) and the gateway will deliver it."
+        "![description](url-or-path) and the gateway will deliver it. If the "
+        "user has attached an image and asks to transform, restyle, cartoonize, "
+        "fix, or edit that same image, pass the attached image file path(s) "
+        "from the current turn in `source_images`."
     ),
     "parameters": {
         "type": "object",
@@ -872,6 +876,15 @@ IMAGE_GENERATE_SCHEMA = {
                 "enum": list(VALID_ASPECT_RATIOS),
                 "description": "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.",
                 "default": DEFAULT_ASPECT_RATIO,
+            },
+            "source_images": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional local image paths, image URLs, data:image URLs, or OpenAI file IDs "
+                    "to use as direct edit/reference inputs. When provided, compatible backends "
+                    "transform these images instead of generating only from text."
+                ),
             },
         },
         "required": ["prompt"],
@@ -900,7 +913,17 @@ def _read_configured_image_provider():
     return None
 
 
-def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
+def _has_source_images(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple)):
+        return any(bool(str(item).strip()) for item in value)
+    return True
+
+
+def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str, source_images=None):
     """Route the call to a plugin-registered provider when one is selected.
 
     Returns a JSON string on dispatch, or ``None`` to fall through to the
@@ -950,7 +973,11 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
         })
 
     try:
-        result = provider.generate(prompt=prompt, aspect_ratio=aspect_ratio)
+        result = provider.generate(
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            source_images=source_images,
+        )
     except Exception as exc:
         logger.warning(
             "Image gen provider '%s' raised: %s",
@@ -977,12 +1004,23 @@ def _handle_image_generate(args, **kw):
     if not prompt:
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
+    source_images = args.get("source_images")
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).
-    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio)
+    dispatched = _dispatch_to_plugin_provider(
+        prompt,
+        aspect_ratio,
+        source_images=source_images,
+    )
     if dispatched is not None:
         return dispatched
+
+    if _has_source_images(source_images):
+        return tool_error(
+            "source_images requires an image_gen provider that supports direct "
+            "image edits. Set image_gen.provider to openai-codex for Codex auth."
+        )
 
     return image_generate_tool(
         prompt=prompt,

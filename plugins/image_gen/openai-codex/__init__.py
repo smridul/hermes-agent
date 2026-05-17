@@ -19,8 +19,11 @@ Output is saved as PNG under ``$HERMES_HOME/cache/images/``.
 
 from __future__ import annotations
 
+import base64
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+import mimetypes
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
@@ -67,6 +70,14 @@ _SIZES = {
     "landscape": "1536x1024",
     "square": "1024x1024",
     "portrait": "1024x1536",
+}
+
+_MAX_SOURCE_IMAGES = 16
+_MAX_SOURCE_IMAGE_BYTES = 50 * 1024 * 1024
+_SUPPORTED_SOURCE_MIMES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
 }
 
 # Codex Responses surface used for the request. The chat model itself is only
@@ -161,9 +172,91 @@ def _build_codex_client():
         return None
 
 
-def _collect_image_b64(client: Any, *, prompt: str, size: str, quality: str) -> Optional[str]:
+def _source_image_to_part(raw: str) -> Dict[str, str]:
+    """Convert a source image reference into a Responses ``input_image`` part."""
+    ref = str(raw or "").strip()
+    if not ref:
+        raise ValueError("Source image references must be non-empty strings")
+
+    lowered = ref.lower()
+    if lowered.startswith(("http://", "https://")):
+        return {"type": "input_image", "image_url": ref}
+    if lowered.startswith("data:image/"):
+        return {"type": "input_image", "image_url": ref}
+    if ref.startswith("file-"):
+        return {"type": "input_image", "file_id": ref}
+
+    path = Path(ref).expanduser()
+    if not path.exists() or not path.is_file():
+        raise ValueError(f"Source image not found: {ref}")
+
+    size = path.stat().st_size
+    if size > _MAX_SOURCE_IMAGE_BYTES:
+        raise ValueError(f"Source image is larger than 50MB: {ref}")
+
+    mime, _ = mimetypes.guess_type(str(path))
+    if not mime:
+        suffix = path.suffix.lower()
+        mime = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }.get(suffix)
+    if mime not in _SUPPORTED_SOURCE_MIMES:
+        raise ValueError(
+            f"Unsupported source image type for {ref}; use PNG, JPEG, or WebP"
+        )
+
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return {"type": "input_image", "image_url": f"data:{mime};base64,{encoded}"}
+
+
+def _normalize_source_image_parts(source_images: Any) -> List[Dict[str, str]]:
+    """Return Responses content parts for optional edit source images."""
+    if source_images is None or source_images == "":
+        return []
+    if isinstance(source_images, (str, Path)):
+        refs: Sequence[Any] = [source_images]
+    elif isinstance(source_images, Sequence):
+        refs = source_images
+    else:
+        raise ValueError("source_images must be a string or an array of strings")
+
+    refs = list(refs)
+    if len(refs) > _MAX_SOURCE_IMAGES:
+        raise ValueError("source_images supports at most 16 images")
+
+    parts: List[Dict[str, str]] = []
+    for ref in refs:
+        if not isinstance(ref, (str, Path)):
+            raise ValueError("source_images entries must be strings")
+        parts.append(_source_image_to_part(str(ref)))
+    return parts
+
+
+def _collect_image_b64(
+    client: Any,
+    *,
+    prompt: str,
+    size: str,
+    quality: str,
+    source_image_parts: Optional[List[Dict[str, str]]] = None,
+) -> Optional[str]:
     """Stream a Codex Responses image_generation call and return the b64 image."""
     image_b64: Optional[str] = None
+    image_parts = source_image_parts or []
+    tool: Dict[str, Any] = {
+        "type": "image_generation",
+        "model": API_MODEL,
+        "size": size,
+        "quality": quality,
+        "output_format": "png",
+        "background": "opaque",
+        "partial_images": 1,
+    }
+    if image_parts:
+        tool["action"] = "edit"
 
     with client.responses.stream(
         model=_CODEX_CHAT_MODEL,
@@ -172,17 +265,9 @@ def _collect_image_b64(client: Any, *, prompt: str, size: str, quality: str) -> 
         input=[{
             "type": "message",
             "role": "user",
-            "content": [{"type": "input_text", "text": prompt}],
+            "content": [{"type": "input_text", "text": prompt}, *image_parts],
         }],
-        tools=[{
-            "type": "image_generation",
-            "model": API_MODEL,
-            "size": size,
-            "quality": quality,
-            "output_format": "png",
-            "background": "opaque",
-            "partial_images": 1,
-        }],
+        tools=[tool],
         tool_choice={
             "type": "allowed_tools",
             "mode": "required",
@@ -307,6 +392,18 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
         tier_id, meta = _resolve_model()
         size = _SIZES.get(aspect, _SIZES["square"])
 
+        try:
+            source_image_parts = _normalize_source_image_parts(kwargs.get("source_images"))
+        except ValueError as exc:
+            return error_response(
+                error=str(exc),
+                error_type="invalid_argument",
+                provider="openai-codex",
+                model=tier_id,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
+
         client = _build_codex_client()
         if client is None:
             return error_response(
@@ -324,6 +421,7 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
                 prompt=prompt,
                 size=size,
                 quality=meta["quality"],
+                source_image_parts=source_image_parts,
             )
         except Exception as exc:
             logger.debug("Codex image generation failed", exc_info=True)
@@ -364,7 +462,12 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
             prompt=prompt,
             aspect_ratio=aspect,
             provider="openai-codex",
-            extra={"size": size, "quality": meta["quality"]},
+            extra={
+                "size": size,
+                "quality": meta["quality"],
+                "edit": bool(source_image_parts),
+                "source_image_count": len(source_image_parts),
+            },
         )
 
 

@@ -363,15 +363,29 @@ class TestAspectRatioNormalization:
 
 class TestRegistryIntegration:
 
-    def test_schema_exposes_only_prompt_and_aspect_ratio_to_agent(self, image_tool):
+    def test_schema_exposes_prompt_aspect_ratio_and_source_images_to_agent(self, image_tool):
         """The agent-facing schema must stay tight — model selection is a
         user-level config choice, not an agent-level arg."""
         props = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
-        assert set(props.keys()) == {"prompt", "aspect_ratio"}
+        assert set(props.keys()) == {"prompt", "aspect_ratio", "source_images"}
 
     def test_aspect_ratio_enum_is_three_values(self, image_tool):
         enum = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]["aspect_ratio"]["enum"]
         assert set(enum) == {"landscape", "square", "portrait"}
+
+    def test_source_images_schema_accepts_image_references(self, image_tool):
+        prop = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]["source_images"]
+        assert prop["type"] == "array"
+        assert prop["items"]["type"] == "string"
+
+    def test_fal_path_rejects_source_images_instead_of_ignoring_them(self, image_tool, monkeypatch):
+        monkeypatch.setattr(image_tool, "_dispatch_to_plugin_provider", lambda *a, **kw: None)
+        result = image_tool._handle_image_generate({
+            "prompt": "make this a cartoon",
+            "source_images": ["/tmp/source.png"],
+        })
+        assert "source_images requires an image_gen provider" in result
+        assert "openai-codex" in result
 
 
 # ---------------------------------------------------------------------------

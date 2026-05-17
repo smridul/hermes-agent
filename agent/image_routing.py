@@ -204,6 +204,7 @@ def build_native_content_parts(
     """
     parts: List[Dict[str, Any]] = []
     skipped: List[str] = []
+    attached_paths: List[str] = []
 
     text = (user_text or "").strip()
     if text:
@@ -218,14 +219,29 @@ def build_native_content_parts(
         if not data_url:
             skipped.append(str(raw_path))
             continue
+        attached_paths.append(str(p))
         parts.append({
             "type": "image_url",
             "image_url": {"url": data_url},
         })
 
+    if attached_paths:
+        note = (
+            "[Attached image file paths for tools: "
+            + ", ".join(attached_paths)
+            + "]"
+        )
+        if parts and parts[0].get("type") == "text":
+            parts[0]["text"] = f"{parts[0]['text']}\n\n{note}"
+        else:
+            parts.insert(0, {"type": "text", "text": note})
+
     # If the text was empty, add a neutral prompt so the turn isn't just images.
     if not text and any(p.get("type") == "image_url" for p in parts):
-        parts.insert(0, {"type": "text", "text": "What do you see in this image?"})
+        if parts and parts[0].get("type") == "text":
+            parts[0]["text"] = f"What do you see in this image?\n\n{parts[0]['text']}"
+        else:
+            parts.insert(0, {"type": "text", "text": "What do you see in this image?"})
 
     return parts, skipped
 

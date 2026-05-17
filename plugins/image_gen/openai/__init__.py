@@ -187,6 +187,19 @@ class OpenAIImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
+        source_images = kwargs.get("source_images")
+        if source_images:
+            return error_response(
+                error=(
+                    "source_images is not supported by the OpenAI API-key "
+                    "image provider yet. Use image_gen.provider: openai-codex "
+                    "for direct image edits."
+                ),
+                error_type="unsupported_feature",
+                provider="openai",
+                aspect_ratio=aspect,
+            )
+
         if not os.environ.get("OPENAI_API_KEY"):
             return error_response(
                 error=(
