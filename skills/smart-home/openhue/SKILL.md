@@ -16,6 +16,8 @@ prerequisites:
 
 Control Philips Hue lights and scenes via a Hue Bridge from the terminal.
 
+**Use this skill only when Hermes runs on the same LAN as the Hue Bridge.** If Hermes runs off-LAN (e.g. on a cloud VM with no path to the bridge's local IP), use the `hue-cloud` skill instead — it talks to the Philips Hue Remote API and works from anywhere.
+
 ## Prerequisites
 
 ```bash

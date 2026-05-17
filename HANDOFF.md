@@ -1,5 +1,48 @@
 # HANDOFF.md
 
+## Pickup Task (2026-05-17): Hue Remote API integration — code ready, awaiting redeploy + bootstrap
+
+### Goal
+Let Hermes control Philips Hue lights from the Oracle VM (`eureka-hermes` container), which is **not on the home LAN**. The bundled `openhue` skill requires LAN access and can't be used from the VM. After today's debugging, settled on the Hue Remote API (cloud) path.
+
+### Paths considered and rejected
+1. **openhue-on-Mac, SSH-via-Tailscale.** User killed (correctly): SSH key on VM = full Mac shell access; over-broad.
+2. **openhue-on-Mac, HTTP wrapper bound to Tailscale IP, token-auth.** Killed mid-execution by macOS Sequoia Local Network permission: every `connect()` from a Claude-Code-spawned process to the bridge's `10.0.0.32` returns immediate "No route to host" (RTF_REJECT route). Permission flips are non-durable. See memory `project_macos_local_network_blocks_lan.md`.
+3. **Home Assistant + MCP on always-on home device.** Deferred; user didn't have hardware ready.
+
+### What was built this session
+Code committed-ready (uncommitted as of HANDOFF.md write; ask user before `git commit`):
+- `scripts/hue-cloud/cli.py` — Python stdlib-only CLI. Mirrors openhue's argv: `get light/room/scene`, `set light/room <name> [--on|--off|--brightness|--temperature|--color|--rgb]`, `set scene <name> --room <room>`. Auto-refreshes access token on 401 (Hue rotates refresh tokens — file write is atomic via tmp+rename, 0600 perms).
+- `scripts/hue-cloud/bootstrap.py` — One-time interactive OAuth setup. Reads credentials, prints authorize URL, captures code from pasted redirect URL (no listener needed; user copies from browser address bar), exchanges for tokens, presses remote linkbutton, creates whitelist Hue user, writes `tokens.json`.
+- `skills/smart-home/hue-cloud/SKILL.md` — New skill (`prerequisites.commands: [hue-cloud]`).
+- `skills/smart-home/openhue/SKILL.md` — Added one-paragraph warning: LAN-only; off-LAN setups should use `hue-cloud`.
+- `Dockerfile` — Added two COPY lines after the venv install (cache-friendly placement) that bake both scripts into `/usr/local/bin/` inside the image.
+
+Confirmed against the actual (logged-in) Hue OAuth spec — endpoints, Basic auth pattern, refresh-token rotation, whitelist-user creation flow all match the doc at `developers.meethue.com/develop/hue-api/remote-api-quick-start-guide/`.
+
+### Runtime data on VM (already in place)
+- `/data/hermes-agent/hue-cloud/.env` (mode 600, uid 10000) holds `HUE_APP_ID`, `HUE_CLIENT_ID`, `HUE_CLIENT_SECRET`. Created interactively by user during this session.
+- `/data/hermes-agent/hue-cloud/tokens.json` does not exist yet — `hue-cloud-bootstrap` creates it.
+
+### Stale artifacts from rejected paths (safe to ignore; cleanup optional)
+- `/data/hermes-agent/.ssh/openhue_ed25519{,.pub}` — unused keypair from rejected SSH plan.
+- `/data/hermes-agent/.local/bin/` — empty dir, never populated.
+- On user's Mac: `openhue-cli` Homebrew install, never paired (macOS Local Network block); `brew uninstall openhue/cli/openhue-cli` if cleaning up.
+
+### Next steps to ship
+1. **User commits + pushes** the five changes above (no secrets touched; `.env` lives only on VM volume).
+2. **User triggers Coolify redeploy** of `eureka-hermes` to rebuild the image with the new scripts.
+3. **User runs `docker exec -it eureka-hermes hue-cloud-bootstrap`** interactively. Walks through the OAuth dance once. Tokens land in `/opt/data/hue-cloud/tokens.json` (= `/data/hermes-agent/hue-cloud/tokens.json` on host).
+4. **Smoke test:** `docker exec eureka-hermes hue-cloud get light` — should print the user's lights table.
+5. Agent should auto-pick up the new `hue-cloud` skill on next refresh (the bundled skills index re-discovers `skills/**/SKILL.md`).
+
+### Open questions
+- Whether `https://hermes.eureka-universe.com/oauth/hue/callback` (the registered callback URL) might collide with any future Hermes route. It currently 404s; the bootstrap relies on the user copying the URL bar regardless, so a future 200 there wouldn't break anything — just the user might be confused. Reserve the path if you grow into that domain.
+- v2 CLIP API (`/route/clip/v2/`) wasn't used — v1 (`/route/api/<user>/`) was sufficient and maps directly to openhue's command surface. Migrate to v2 only if v1 is deprecated or if you want sensor/MotionAware data.
+- Skill-index regeneration: `scripts/build_skills_index.py` may need to be re-run after merge so the new skill shows up in the bundled index. Verify on next start.
+
+---
+
 ## Pickup Task (2026-05-11): Make MCP tools work inside profile workers
 
 ### Background

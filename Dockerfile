@@ -144,6 +144,10 @@ RUN chsh -s /usr/bin/zsh hermes
 RUN uv venv && \
     uv pip install --no-cache-dir -e ".[all]"
 
+# ---------- hue-cloud CLI (Philips Hue Remote API) ----------
+COPY --chmod=0755 scripts/hue-cloud/cli.py /usr/local/bin/hue-cloud
+COPY --chmod=0755 scripts/hue-cloud/bootstrap.py /usr/local/bin/hue-cloud-bootstrap
+
 # ---------- Runtime ----------
 USER root
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
