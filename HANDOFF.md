@@ -1,5 +1,63 @@
 # HANDOFF.md
 
+## Completed (2026-05-18): MCP `acting_user` confused-deputy fix
+
+### Bug
+When a non-owner WhatsApp sender (e.g. "Deep") DMed the eureka-hermes bot
+and asked for a private file, the deep MCP server (file_search /
+file_get) returned the owner's private files. Audit logs on the MCP side
+showed `acting_user='mridul'` even though the inbound was from Deep.
+
+### Root cause
+Hermes never asserted caller identity to MCP tools. The file_* tools'
+schemas declare an `acting_user` parameter; the LLM was choosing to fill
+it with `"mridul"` because prior chat-side instructions/memories
+("today only mridul can use the file related mcp tools") primed it to
+default to the operator. The gateway's `build_session_context_prompt`
+did correctly show `**User:** Deep` for Deep's inbounds — the model just
+ignored that for the MCP arg.
+
+`tools/mcp_tool.py` previously did `session.call_tool(tool_name,
+arguments=args)` with zero per-call identity injection. The MCP HTTP
+session is single, with a static `Authorization` header, so per-call
+identity has to ride in the args.
+
+### Fix shape
+Deterministic override at the MCP call boundary:
+
+- `tools/mcp_tool.py:_register_server_tools` — inspects each tool's
+  normalized schema; if `properties.acting_user` exists, sets
+  `has_acting_user=True` when building the handler.
+- `tools/mcp_tool.py:_make_tool_handler` — when `has_acting_user` is true
+  AND `HERMES_SESSION_USER_ID` is non-empty, the handler unconditionally
+  sets `args["acting_user"] = session_user_id` before dispatching. Logs
+  at INFO when an override changes the model-supplied value (audit
+  trail). The LLM cannot impersonate any user.
+- CLI/cron with no inbound sender (session vars unset): handler does
+  nothing — LLM's value stands. Single-trusted-user contexts are fine.
+- Value used: `HERMES_SESSION_USER_ID` (the JID/LID like
+  `180866038948085@lid`), per user's note. MCP server side may need to
+  map LIDs → logical users; that's deep MCP's responsibility.
+
+### Tests
+`tests/tools/test_mcp_tool.py::TestActingUserOverride` — 5 cases:
+1. Overrides LLM-supplied value
+2. Injects when LLM omits
+3. No-op when session user unset (CLI/cron)
+4. No-op when schema doesn't declare `acting_user`
+5. End-to-end via `_register_server_tools` + `registry.dispatch`
+
+187/187 in `test_mcp_tool.py` pass. Broader `tests/tools/` regression
+showed 24 pre-existing failures (confirmed via `git stash`); none
+introduced by this change.
+
+### Deploy
+Standard source-only flow: commit + push + Coolify rebuild
+`eureka-hermes`. No config / env changes required. Per-user logical
+mapping (LID → "mridul"/"deep"/etc.) lives on the deep MCP side.
+
+---
+
 ## Pickup Task (2026-05-17): Hue Remote API integration — code ready, awaiting redeploy + bootstrap
 
 ### Goal

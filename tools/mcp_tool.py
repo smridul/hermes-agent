@@ -2003,11 +2003,28 @@ async def _connect_server(name: str, config: dict) -> MCPServerTask:
 # Handler / check-fn factories
 # ---------------------------------------------------------------------------
 
-def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
+def _make_tool_handler(
+    server_name: str,
+    tool_name: str,
+    tool_timeout: float,
+    *,
+    has_acting_user: bool = False,
+):
     """Return a sync handler that calls an MCP tool via the background loop.
 
     The handler conforms to the registry's dispatch interface:
     ``handler(args_dict, **kwargs) -> str``
+
+    When *has_acting_user* is true, the handler deterministically overrides
+    ``args["acting_user"]`` with the current gateway session's user
+    identifier (``HERMES_SESSION_USER_ID``) before dispatching the call.
+    This closes a confused-deputy bug where the LLM, prompted by stale
+    instructions or memories, would supply the operator's identity for
+    inbound messages from a different sender — letting that sender read
+    files the owner had marked private. The gateway is the only component
+    that knows who the inbound sender actually is, so identity is asserted
+    here and never trusted from the model. If no session user is set
+    (CLI / cron / tests), the LLM's value is left intact.
     """
 
     def _handler(args: dict, **kwargs) -> str:
@@ -2044,6 +2061,25 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             return json.dumps({
                 "error": f"MCP server '{server_name}' is not connected"
             }, ensure_ascii=False)
+
+        # Identity override: the gateway is the only component that knows
+        # who sent the inbound message. Asserting acting_user from session
+        # context (and refusing to trust the model's value) prevents a
+        # confused-deputy where a non-owner sender reaches private data
+        # by hitting a tool that the model populated with the operator's
+        # name. Lazy-imported to avoid a tools→gateway cycle at import time.
+        if has_acting_user:
+            from gateway.session_context import get_session_env
+            session_user = get_session_env("HERMES_SESSION_USER_ID", "")
+            if session_user:
+                supplied = args.get("acting_user")
+                if supplied != session_user:
+                    logger.info(
+                        "MCP tool %s/%s: overriding acting_user %r → %r "
+                        "(session identity asserted by gateway)",
+                        server_name, tool_name, supplied, session_user,
+                    )
+                args = {**args, "acting_user": session_user}
 
         async def _call():
             async with server._rpc_lock:
@@ -2750,11 +2786,23 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
             )
             continue
 
+        # Detect identity contract: if the tool's schema declares an
+        # `acting_user` parameter, the handler will deterministically
+        # populate it from the gateway session at dispatch time rather
+        # than trusting whatever the model produced.
+        _props = (schema.get("parameters") or {}).get("properties") or {}
+        _has_acting_user = isinstance(_props, dict) and "acting_user" in _props
+
         registry.register(
             name=tool_name_prefixed,
             toolset=toolset_name,
             schema=schema,
-            handler=_make_tool_handler(name, mcp_tool.name, server.tool_timeout),
+            handler=_make_tool_handler(
+                name,
+                mcp_tool.name,
+                server.tool_timeout,
+                has_acting_user=_has_acting_user,
+            ),
             check_fn=_make_check_fn(name),
             is_async=False,
             description=schema["description"],
