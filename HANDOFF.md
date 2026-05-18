@@ -56,6 +56,33 @@ Standard source-only flow: commit + push + Coolify rebuild
 `eureka-hermes`. No config / env changes required. Per-user logical
 mapping (LID → "mridul"/"deep"/etc.) lives on the deep MCP side.
 
+### Verified in production (2026-05-18 23:35)
+Trajectory `20260518_215322_b58e4f1a.jsonl` in test_profile shows
+post-fix behavior: Deep asked "don't return from existing file, make
+mcp call" → LLM called `file_get` with `acting_user=
+"104084237459666@lid"` (Mridul's LID, what it always did) → MCP
+returned `"forbidden: file not visible or does not exist"`. The
+identical call SUCCEEDED in the pre-fix trajectory two hours earlier
+— only the override changes between the two runs, so MCP is receiving
+the gateway-asserted Deep LID and correctly refusing. The agent's
+own reply: *"I did make the MCP call just now — and MCP refused it."*
+
+User also confirmed Deep gets the right refusal in both DM and group
+contexts. The earlier 23:28 cached-`MEDIA:`-path leak no longer
+reproduces in fresh testing; the override's downstream effect appears
+to cover the cached-path-replay case too (agent refuses to re-serve
+when MCP can't reconfirm visibility for the current sender).
+
+### Follow-ups (optional, not blocking)
+- Commit `72f7fc8ab` adds an unconditional INFO log on every
+  acting_user-aware MCP call (audit trail). Useful while the
+  feature is new; consider reverting later to reduce log volume.
+- If a tainted session ever does replay a path via `MEDIA:` without
+  a re-validation through MCP, a defense-in-depth fix is to sandbox
+  `/data/shared/agent-uploads/<file_id>/` per worker, or to
+  re-validate any `MEDIA:` path through MCP at the WhatsApp egress
+  boundary using the current session user's identity.
+
 ---
 
 ## Pickup Task (2026-05-17): Hue Remote API integration — code ready, awaiting redeploy + bootstrap
