@@ -2071,8 +2071,14 @@ def _make_tool_handler(
         if has_acting_user:
             from gateway.session_context import get_session_env
             session_user = get_session_env("HERMES_SESSION_USER_ID", "")
+            session_name = get_session_env("HERMES_SESSION_USER_NAME", "")
+            supplied = args.get("acting_user")
+            logger.info(
+                "MCP identity-check %s/%s: session_user_id=%r "
+                "session_user_name=%r model_supplied=%r",
+                server_name, tool_name, session_user, session_name, supplied,
+            )
             if session_user:
-                supplied = args.get("acting_user")
                 if supplied != session_user:
                     logger.info(
                         "MCP tool %s/%s: overriding acting_user %r → %r "
