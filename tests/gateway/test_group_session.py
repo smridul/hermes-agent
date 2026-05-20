@@ -1,4 +1,13 @@
-from gateway.platforms.group_session import SLEEP_KEYWORDS, is_sleep_command
+import asyncio
+from unittest.mock import AsyncMock
+
+import pytest
+
+from gateway.platforms.group_session import (
+    SLEEP_KEYWORDS,
+    GroupSessionManager,
+    is_sleep_command,
+)
 
 
 def test_exact_sleep_keyword_is_a_command():
@@ -29,14 +38,6 @@ def test_sleep_keyword_set_contains_expected_keywords():
         "sleep", "stop", "go to sleep",
         "sleep now", "stop listening", "quiet",
     })
-
-
-import asyncio
-from unittest.mock import AsyncMock
-
-import pytest
-
-from gateway.platforms.group_session import GroupSessionManager
 
 
 class FakeClock:
@@ -72,8 +73,7 @@ async def test_is_awake_reflects_clock():
         mgr.shutdown()
 
 
-@pytest.mark.asyncio
-async def test_is_awake_false_for_unknown_group():
+def test_is_awake_false_for_unknown_group():
     mgr = GroupSessionManager(window_seconds=900, on_expire=AsyncMock(), now_fn=FakeClock())
     assert mgr.is_awake("never@g.us") is False
 
@@ -104,3 +104,13 @@ async def test_close_prevents_expiry_callback():
     mgr.close("g1@g.us")
     await asyncio.sleep(0.12)
     on_expire.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reopen_after_natural_expiry_returns_true():
+    mgr = GroupSessionManager(window_seconds=0.02, on_expire=AsyncMock())
+    assert mgr.open_or_reset("g1@g.us") is True
+    await asyncio.sleep(0.08)
+    assert mgr.is_awake("g1@g.us") is False
+    assert mgr.open_or_reset("g1@g.us") is True
+    mgr.shutdown()
