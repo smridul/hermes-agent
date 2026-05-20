@@ -141,3 +141,63 @@ def test_wake_notice_mentions_window_length():
     adapter = _make_adapter(group_session_minutes=20)
     notice = adapter._group_session_wake_notice()
     assert "20" in notice
+
+
+# --- Task 5: _group_session_decision ---
+
+CHAT_ID = "120363001234567890@g.us"
+
+
+@pytest.mark.asyncio
+async def test_decision_wake_opens_window_and_sends_notice():
+    adapter = _make_adapter()
+    decision = await adapter._group_session_decision(_mention_message("hey"))
+    assert decision == "process"
+    adapter.send.assert_awaited_once()
+    assert adapter._group_session_manager.is_awake(CHAT_ID) is True
+    adapter._group_session_manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_decision_plain_message_while_open_is_processed():
+    adapter = _make_adapter()
+    await adapter._group_session_decision(_mention_message("hi"))
+    decision = await adapter._group_session_decision(_group_message("just chatting"))
+    assert decision == "process"
+    adapter._group_session_manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_decision_plain_message_while_closed_is_classic():
+    adapter = _make_adapter()
+    decision = await adapter._group_session_decision(_group_message("just chatting"))
+    assert decision == "classic"
+    adapter._group_session_manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_decision_sleep_closes_window_and_swallows():
+    adapter = _make_adapter()
+    await adapter._group_session_decision(_mention_message("hi"))
+    decision = await adapter._group_session_decision(_mention_message("@15551230000 sleep"))
+    assert decision == "swallow"
+    assert adapter._group_session_manager.is_awake(CHAT_ID) is False
+    adapter._group_session_manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_decision_sleep_while_closed_swallows_without_notice():
+    adapter = _make_adapter()
+    decision = await adapter._group_session_decision(_mention_message("@15551230000 sleep"))
+    assert decision == "swallow"
+    adapter.send.assert_not_awaited()
+    adapter._group_session_manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_decision_re_mention_does_not_resend_wake_notice():
+    adapter = _make_adapter()
+    await adapter._group_session_decision(_mention_message("hi"))
+    await adapter._group_session_decision(_mention_message("still here"))
+    assert adapter.send.await_count == 1
+    adapter._group_session_manager.shutdown()

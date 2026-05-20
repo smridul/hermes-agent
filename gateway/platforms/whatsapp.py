@@ -437,6 +437,42 @@ class WhatsAppAdapter(BasePlatformAdapter):
             return "sleep"
         return "wake"
 
+    def _ensure_group_session_manager(self) -> GroupSessionManager:
+        if self._group_session_manager is None:
+            self._group_session_manager = GroupSessionManager(
+                window_seconds=self._group_session_minutes * 60,
+                on_expire=self._on_group_session_expire,
+            )
+        return self._group_session_manager
+
+    async def _on_group_session_expire(self, chat_id: str) -> None:
+        await self.send(chat_id, self._GROUP_SESSION_EXPIRY_NOTICE)
+
+    async def _group_session_decision(self, data: Dict[str, Any]) -> str:
+        """Drive the awake-window for one inbound group message.
+
+        Returns one of:
+          "process" — the awake window is open (or just opened); process it.
+          "swallow" — this was a sleep command; do not process it.
+          "classic" — no window involvement; defer to _should_process_message.
+        """
+        manager = self._ensure_group_session_manager()
+        chat_id = str(data.get("chatId") or "")
+        control = self._classify_group_control(data)
+        if control == "sleep":
+            if manager.is_awake(chat_id):
+                manager.close(chat_id)
+                await self.send(chat_id, self._GROUP_SESSION_SLEEP_NOTICE)
+            return "swallow"
+        if control == "wake":
+            newly_opened = manager.open_or_reset(chat_id)
+            if newly_opened:
+                await self.send(chat_id, self._group_session_wake_notice())
+            return "process"
+        if manager.is_awake(chat_id):
+            return "process"
+        return "classic"
+
     async def connect(self) -> bool:
         """
         Start the WhatsApp bridge.
