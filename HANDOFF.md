@@ -1,5 +1,54 @@
 # HANDOFF.md
 
+## Completed (2026-05-19): WhatsApp group awake-window
+
+### Feature
+In a WhatsApp group with `require_mention: true`, an @-mention of the agent opens a
+15-minute **awake window** during which the agent answers every message — even untagged
+ones. Re-mentioning resets the 15-min timer. A message that @-mentions the agent and
+whose mention-stripped body is exactly a sleep keyword (`sleep`, `stop`, `go to sleep`,
+`sleep now`, `stop listening`, `quiet`) closes the window early. The agent posts a wake
+notice when the window opens, a sleep notice when closed early, and an expiry notice when
+the timer runs out. State is in-memory — a gateway restart reverts to mention-required.
+The feature is **opt-in** (off by default); other profiles are unaffected.
+
+### New module
+`gateway/platforms/group_session.py` — `SLEEP_KEYWORDS`, `is_sleep_command()`,
+`GroupSession` dataclass, `GroupSessionManager` (per-group timer/state core with asyncio
+expiry tasks).
+
+### Adapter changes (`gateway/platforms/whatsapp.py`)
+Added config readers, `_classify_group_control`, `_group_session_decision`,
+`_passes_inbound_gate` (the new inbound gate, wired into `_build_message_event`). The
+classic `_should_process_message` is unchanged — zero behavior change when the feature is
+off.
+
+### Config keys (in the `whatsapp:` config block)
+- `group_session_window` (bool, default **false** — opt-in) — env fallback
+  `WHATSAPP_GROUP_SESSION_WINDOW`
+- `group_session_minutes` (int, default **15**) — env fallback
+  `WHATSAPP_GROUP_SESSION_MINUTES`
+
+### Spec & plan
+- `docs/superpowers/specs/2026-05-19-whatsapp-group-awake-window-design.md`
+- `docs/superpowers/plans/2026-05-19-whatsapp-group-awake-window.md`
+
+### Tests
+- `tests/gateway/test_group_session.py` — 12/12 passed
+- `tests/gateway/test_whatsapp_group_session.py` — 29/29 passed
+- `tests/gateway/test_whatsapp_group_gating.py` (pre-existing classic-gate suite) — 23/23
+  passed (unchanged behavior confirmed)
+- Full `tests/gateway/` run: 4542 passed, 74 skipped, 14 failures — all 14 failures are
+  pre-existing (DingTalk AI-card, Feishu bot-identity, Teams send-typing,
+  blocking-approval E2E); none involve WhatsApp or group_session files.
+
+### Deploy / activation
+Standard source-only flow: commit + push, then Coolify rebuild of `eureka-hermes`. To
+**activate** the feature, set `group_session_window: true` in the group's profile
+`config.yaml`. Other profiles remain unaffected (default is `false`).
+
+---
+
 ## Completed (2026-05-18): MCP `acting_user` confused-deputy fix
 
 ### Bug
