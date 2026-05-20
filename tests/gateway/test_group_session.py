@@ -24,5 +24,8 @@ def test_empty_text_is_not_a_command():
     assert is_sleep_command("   ") is False
 
 
-def test_sleep_keywords_set_is_non_empty():
-    assert "sleep" in SLEEP_KEYWORDS
+def test_sleep_keyword_set_contains_expected_keywords():
+    assert SLEEP_KEYWORDS == frozenset({
+        "sleep", "stop", "go to sleep",
+        "sleep now", "stop listening", "quiet",
+    })

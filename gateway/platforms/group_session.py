@@ -33,5 +33,6 @@ def is_sleep_command(text: str) -> bool:
     """
     if not text:
         return False
+    # str.split() with no arg collapses all whitespace; whitespace-only -> ""
     normalized = " ".join(text.lower().split())
     return normalized in SLEEP_KEYWORDS
