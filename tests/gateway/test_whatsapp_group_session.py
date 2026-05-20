@@ -211,3 +211,65 @@ async def test_decision_handles_missing_chat_id():
     decision = await adapter._group_session_decision(_mention_message("hey", chatId=None))
     assert decision == "process"
     adapter._group_session_manager.shutdown()
+
+
+# --- Task 6: _passes_inbound_gate integration ---
+
+def _dm_message(body="hello"):
+    return {
+        "isGroup": False,
+        "body": body,
+        "senderId": "6281234567890@s.whatsapp.net",
+        "from": "6281234567890@s.whatsapp.net",
+        "botIds": [],
+        "mentionedIds": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_gate_dm_unaffected():
+    adapter = _make_adapter()
+    assert await adapter._passes_inbound_gate(_dm_message("hello")) is True
+
+
+@pytest.mark.asyncio
+async def test_gate_plain_group_message_blocked_when_closed():
+    adapter = _make_adapter()
+    assert await adapter._passes_inbound_gate(_group_message("hello")) is False
+    adapter._group_session_manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_gate_mention_opens_window_then_plain_passes():
+    adapter = _make_adapter()
+    assert await adapter._passes_inbound_gate(_mention_message("hey")) is True
+    assert await adapter._passes_inbound_gate(_group_message("untagged followup")) is True
+    adapter._group_session_manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_gate_sleep_command_is_blocked_and_closes_window():
+    adapter = _make_adapter()
+    await adapter._passes_inbound_gate(_mention_message("hey"))
+    assert await adapter._passes_inbound_gate(_mention_message("@15551230000 sleep")) is False
+    assert await adapter._passes_inbound_gate(_group_message("untagged after sleep")) is False
+    adapter._group_session_manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_gate_feature_off_uses_classic_behavior():
+    adapter = _make_adapter(group_session_window=False)
+    # mention still triggers a response under the classic gate
+    assert await adapter._passes_inbound_gate(_mention_message("hey")) is True
+    # plain message stays blocked, and no window is created
+    assert await adapter._passes_inbound_gate(_group_message("plain")) is False
+    assert adapter._group_session_manager is None
+
+
+@pytest.mark.asyncio
+async def test_gate_disallowed_group_blocked_before_session_logic():
+    adapter = _make_adapter()
+    adapter._group_policy = "allowlist"
+    adapter._group_allow_from = {"999999999999@g.us"}
+    assert await adapter._passes_inbound_gate(_mention_message("hey")) is False
+    assert adapter._group_session_manager is None

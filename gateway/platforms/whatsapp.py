@@ -478,6 +478,26 @@ class WhatsAppAdapter(BasePlatformAdapter):
             return "process"
         return "classic"
 
+    async def _passes_inbound_gate(self, data: Dict[str, Any]) -> bool:
+        """Decide whether an inbound message should be processed.
+
+        Wraps the classic _should_process_message gate with the group
+        awake-window. DMs and the feature-off path are unchanged.
+        """
+        if not data.get("isGroup", False):
+            return self._should_process_message(data)
+        chat_id = str(data.get("chatId") or "")
+        if not self._is_group_allowed(chat_id):
+            return False
+        if self._group_session_window:
+            decision = await self._group_session_decision(data)
+            if decision == "swallow":
+                return False
+            if decision == "process":
+                return True
+            # decision == "classic" — fall through to the classic gate
+        return self._should_process_message(data)
+
     async def connect(self) -> bool:
         """
         Start the WhatsApp bridge.
@@ -1104,7 +1124,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
     async def _build_message_event(self, data: Dict[str, Any]) -> Optional[MessageEvent]:
         """Build a MessageEvent from bridge message data, downloading images to cache."""
         try:
-            if not self._should_process_message(data):
+            if not await self._passes_inbound_gate(data):
                 return None
 
             # Determine message type
