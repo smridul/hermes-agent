@@ -190,6 +190,13 @@ class WhatsAppAdapter(BasePlatformAdapter):
     # Default bridge location relative to the hermes-agent install
     _DEFAULT_BRIDGE_DIR = Path(__file__).resolve().parents[2] / "scripts" / "whatsapp-bridge"
 
+    _GROUP_SESSION_SLEEP_NOTICE = (
+        "😴 Going quiet. Tag me again whenever you want me back."
+    )
+    _GROUP_SESSION_EXPIRY_NOTICE = (
+        "⌛ I've stopped following the chat. Tag me to talk again."
+    )
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WHATSAPP)
         self._bridge_process: Optional[subprocess.Popen] = None
@@ -406,7 +413,29 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if self._message_mentions_bot(data):
             return True
         return self._message_matches_mention_patterns(data)
-    
+
+    def _group_session_wake_notice(self) -> str:
+        return (
+            f"👂 I'm following this chat for the next "
+            f"{self._group_session_minutes} minutes — no need to tag me. "
+            f"Tag me with \"sleep\" to stop early."
+        )
+
+    def _classify_group_control(self, data: Dict[str, Any]) -> Optional[str]:
+        """Classify a group message as an awake-window control message.
+
+        Returns "wake" if the message @-mentions the agent, "sleep" if it
+        @-mentions the agent and its mention-stripped body is exactly a
+        sleep command, or None if it is neither.
+        """
+        if not self._message_mentions_bot(data):
+            return None
+        body = str(data.get("body") or "")
+        cleaned = self._clean_bot_mention_text(body, data)
+        if is_sleep_command(cleaned):
+            return "sleep"
+        return "wake"
+
     async def connect(self) -> bool:
         """
         Start the WhatsApp bridge.

@@ -103,3 +103,33 @@ def test_group_session_minutes_rejects_non_positive():
 
 def test_group_session_minutes_rejects_negative():
     assert _bare_adapter({"group_session_minutes": -5})._whatsapp_group_session_minutes() == 15
+
+
+# --- Task 4: message classification ---
+
+def test_classify_plain_message_returns_none():
+    adapter = _make_adapter()
+    assert adapter._classify_group_control(_group_message("hello there")) is None
+
+
+def test_classify_mention_returns_wake():
+    adapter = _make_adapter()
+    assert adapter._classify_group_control(_mention_message("hey what's up")) == "wake"
+
+
+def test_classify_mention_plus_sleep_returns_sleep():
+    adapter = _make_adapter()
+    msg = _mention_message("@15551230000 sleep")
+    assert adapter._classify_group_control(msg) == "sleep"
+
+
+def test_classify_mention_plus_sleep_word_in_sentence_returns_wake():
+    adapter = _make_adapter()
+    msg = _mention_message("@15551230000 should i go to sleep early tonight")
+    assert adapter._classify_group_control(msg) == "wake"
+
+
+def test_wake_notice_mentions_window_length():
+    adapter = _make_adapter(group_session_minutes=20)
+    notice = adapter._group_session_wake_notice()
+    assert "20" in notice
