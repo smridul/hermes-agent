@@ -182,6 +182,7 @@ async def test_decision_sleep_closes_window_and_swallows():
     decision = await adapter._group_session_decision(_mention_message("@15551230000 sleep"))
     assert decision == "swallow"
     assert adapter._group_session_manager.is_awake(CHAT_ID) is False
+    assert adapter.send.await_count == 2
     adapter._group_session_manager.shutdown()
 
 
@@ -200,4 +201,13 @@ async def test_decision_re_mention_does_not_resend_wake_notice():
     await adapter._group_session_decision(_mention_message("hi"))
     await adapter._group_session_decision(_mention_message("still here"))
     assert adapter.send.await_count == 1
+    adapter._group_session_manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_decision_handles_missing_chat_id():
+    # chatId absent → chat_id coerces to "" and the decision still works.
+    adapter = _make_adapter()
+    decision = await adapter._group_session_decision(_mention_message("hey", chatId=None))
+    assert decision == "process"
     adapter._group_session_manager.shutdown()

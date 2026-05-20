@@ -438,6 +438,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
         return "wake"
 
     def _ensure_group_session_manager(self) -> GroupSessionManager:
+        """Lazily construct the GroupSessionManager on first call; must not be invoked before the event loop is running."""
         if self._group_session_manager is None:
             self._group_session_manager = GroupSessionManager(
                 window_seconds=self._group_session_minutes * 60,
@@ -448,7 +449,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
     async def _on_group_session_expire(self, chat_id: str) -> None:
         await self.send(chat_id, self._GROUP_SESSION_EXPIRY_NOTICE)
 
-    async def _group_session_decision(self, data: Dict[str, Any]) -> str:
+    async def _group_session_decision(self, data: Dict[str, Any]) -> Literal["process", "swallow", "classic"]:
         """Drive the awake-window for one inbound group message.
 
         Returns one of:
@@ -465,6 +466,10 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 await self.send(chat_id, self._GROUP_SESSION_SLEEP_NOTICE)
             return "swallow"
         if control == "wake":
+            # open_or_reset returns False if a stale session entry exists
+            # whose expiry task has fired its sleep but not yet popped the
+            # entry (~one poll-loop tick). In that narrow window the wake
+            # notice is suppressed — acceptable given the sequential poll loop.
             newly_opened = manager.open_or_reset(chat_id)
             if newly_opened:
                 await self.send(chat_id, self._group_session_wake_notice())
