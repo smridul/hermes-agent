@@ -137,6 +137,7 @@ from gateway.platforms.base import (
     cache_audio_from_url,
 )
 from gateway.whatsapp_identity import canonical_whatsapp_identifier
+from gateway.platforms.group_session import GroupSessionManager, is_sleep_command
 
 
 def check_whatsapp_requirements() -> bool:
@@ -220,6 +221,12 @@ class WhatsAppAdapter(BasePlatformAdapter):
         # notification before the normal "✓ whatsapp disconnected" fires.
         self._shutting_down: bool = False
 
+        # Group awake-window: an @-mention opens a timed window during which
+        # every group message is processed untagged. See group_session.py.
+        self._group_session_window: bool = self._whatsapp_group_session_enabled()
+        self._group_session_minutes: int = self._whatsapp_group_session_minutes()
+        self._group_session_manager: Optional[GroupSessionManager] = None
+
     def _whatsapp_require_mention(self) -> bool:
         configured = self.config.extra.get("require_mention")
         if configured is not None:
@@ -235,6 +242,24 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
         return {part.strip() for part in str(raw).split(",") if part.strip()}
+
+    def _whatsapp_group_session_enabled(self) -> bool:
+        configured = self.config.extra.get("group_session_window")
+        if configured is not None:
+            if isinstance(configured, str):
+                return configured.lower() in ("true", "1", "yes", "on")
+            return bool(configured)
+        return os.getenv("WHATSAPP_GROUP_SESSION_WINDOW", "false").lower() in ("true", "1", "yes", "on")
+
+    def _whatsapp_group_session_minutes(self) -> int:
+        configured = self.config.extra.get("group_session_minutes")
+        if configured is None:
+            configured = os.getenv("WHATSAPP_GROUP_SESSION_MINUTES", "15")
+        try:
+            minutes = int(configured)
+        except (TypeError, ValueError):
+            return 15
+        return minutes if minutes > 0 else 15
 
     @staticmethod
     def _coerce_allow_list(raw) -> set[str]:
