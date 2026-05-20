@@ -129,6 +129,14 @@ def test_classify_mention_plus_sleep_word_in_sentence_returns_wake():
     assert adapter._classify_group_control(msg) == "wake"
 
 
+def test_classify_bare_mention_returns_wake():
+    adapter = _make_adapter()
+    # Body is only the mention tag; _clean_bot_mention_text returns the
+    # original when stripping would empty it — must still be a wake, not sleep.
+    msg = _mention_message("@15551230000")
+    assert adapter._classify_group_control(msg) == "wake"
+
+
 def test_wake_notice_mentions_window_length():
     adapter = _make_adapter(group_session_minutes=20)
     notice = adapter._group_session_wake_notice()

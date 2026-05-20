@@ -25,7 +25,7 @@ import subprocess
 
 _IS_WINDOWS = platform.system() == "Windows"
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, Literal, Optional, Any
 
 from hermes_constants import get_hermes_dir
 
@@ -415,13 +415,14 @@ class WhatsAppAdapter(BasePlatformAdapter):
         return self._message_matches_mention_patterns(data)
 
     def _group_session_wake_notice(self) -> str:
+        """Build the wake-window notice text, including the configured window length in minutes."""
         return (
             f"👂 I'm following this chat for the next "
             f"{self._group_session_minutes} minutes — no need to tag me. "
-            f"Tag me with \"sleep\" to stop early."
+            'Tag me with "sleep" to stop early.'
         )
 
-    def _classify_group_control(self, data: Dict[str, Any]) -> Optional[str]:
+    def _classify_group_control(self, data: Dict[str, Any]) -> Optional[Literal["wake", "sleep"]]:
         """Classify a group message as an awake-window control message.
 
         Returns "wake" if the message @-mentions the agent, "sleep" if it
