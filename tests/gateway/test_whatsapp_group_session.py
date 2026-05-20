@@ -236,6 +236,8 @@ async def test_gate_dm_unaffected():
 async def test_gate_plain_group_message_blocked_when_closed():
     adapter = _make_adapter()
     assert await adapter._passes_inbound_gate(_group_message("hello")) is False
+    # the gate lazily created the manager even though the window stays closed
+    assert adapter._group_session_manager is not None
     adapter._group_session_manager.shutdown()
 
 

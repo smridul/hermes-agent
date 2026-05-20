@@ -496,6 +496,9 @@ class WhatsAppAdapter(BasePlatformAdapter):
             if decision == "process":
                 return True
             # decision == "classic" — fall through to the classic gate
+        # _is_group_allowed already rejected disallowed groups above; the
+        # early guard protects the session manager. _should_process_message
+        # re-checks it harmlessly, then applies the classic mention rules.
         return self._should_process_message(data)
 
     async def connect(self) -> bool:
