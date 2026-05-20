@@ -71,6 +71,14 @@ def test_group_session_enabled_reads_config_string():
     assert _bare_adapter({"group_session_window": "on"})._whatsapp_group_session_enabled() is True
 
 
+def test_group_session_enabled_reads_config_false():
+    assert _bare_adapter({"group_session_window": False})._whatsapp_group_session_enabled() is False
+
+
+def test_group_session_enabled_reads_config_string_false():
+    assert _bare_adapter({"group_session_window": "false"})._whatsapp_group_session_enabled() is False
+
+
 def test_group_session_disabled_by_default(monkeypatch):
     monkeypatch.delenv("WHATSAPP_GROUP_SESSION_WINDOW", raising=False)
     assert _bare_adapter({})._whatsapp_group_session_enabled() is False
@@ -91,3 +99,7 @@ def test_group_session_minutes_rejects_invalid():
 
 def test_group_session_minutes_rejects_non_positive():
     assert _bare_adapter({"group_session_minutes": 0})._whatsapp_group_session_minutes() == 15
+
+
+def test_group_session_minutes_rejects_negative():
+    assert _bare_adapter({"group_session_minutes": -5})._whatsapp_group_session_minutes() == 15
