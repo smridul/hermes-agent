@@ -105,5 +105,8 @@ class GroupSessionManager:
             await asyncio.sleep(self._window_seconds)
         except asyncio.CancelledError:
             return
+        # Pop BEFORE awaiting on_expire: this releases the chat_id so a
+        # re-mention arriving during the callback opens a fresh session
+        # instead of racing this expiring one.
         self._sessions.pop(chat_id, None)
         await self._on_expire(chat_id)

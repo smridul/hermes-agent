@@ -1,9 +1,11 @@
 import asyncio
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
 
 from gateway.config import Platform, PlatformConfig
+from gateway.platforms.base import SendResult
 from gateway.platforms.whatsapp import WhatsAppAdapter
 
 
@@ -275,3 +277,40 @@ async def test_gate_disallowed_group_blocked_before_session_logic():
     adapter._group_allow_from = {"999999999999@g.us"}
     assert await adapter._passes_inbound_gate(_mention_message("hey")) is False
     assert adapter._group_session_manager is None
+
+
+# --- Final review: non-trigger rules + notice-failure logging ---
+
+@pytest.mark.asyncio
+async def test_gate_reply_to_bot_passes_classic_without_opening_window():
+    # Replying to the bot triggers a one-off response via the classic gate
+    # but must NOT open an awake window.
+    adapter = _make_adapter()
+    msg = _group_message("here is my answer", quotedParticipant="15551230000@lid")
+    assert await adapter._passes_inbound_gate(msg) is True
+    assert adapter._group_session_manager.is_awake(CHAT_ID) is False
+    # a following untagged message stays blocked — proof no window opened
+    assert await adapter._passes_inbound_gate(_group_message("untagged")) is False
+    adapter._group_session_manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_gate_mention_pattern_passes_classic_without_opening_window():
+    # A custom mention-pattern match triggers a one-off response via the
+    # classic gate but must NOT open an awake window.
+    adapter = _make_adapter(extra_overrides={"mention_patterns": [r"^\s*chompy\b"]})
+    assert await adapter._passes_inbound_gate(_group_message("chompy status")) is True
+    assert adapter._group_session_manager.is_awake(CHAT_ID) is False
+    assert await adapter._passes_inbound_gate(_group_message("untagged")) is False
+    adapter._group_session_manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_failed_notice_send_logs_a_warning(caplog):
+    adapter = _make_adapter()
+    adapter.send = AsyncMock(return_value=SendResult(success=False, error="bridge down"))
+    with caplog.at_level(logging.WARNING):
+        await adapter._group_session_decision(_mention_message("hey"))
+    assert any("notice failed" in r.getMessage() for r in caplog.records)
+    if adapter._group_session_manager is not None:
+        adapter._group_session_manager.shutdown()

@@ -432,6 +432,9 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if not self._message_mentions_bot(data):
             return None
         body = str(data.get("body") or "")
+        # _clean_bot_mention_text returns the ORIGINAL body when stripping the
+        # mention would empty it, so a bare "@bot" ping cleans to "@bot" (not
+        # "") and correctly classifies as "wake", never "sleep".
         cleaned = self._clean_bot_mention_text(body, data)
         if is_sleep_command(cleaned):
             return "sleep"
@@ -446,8 +449,17 @@ class WhatsAppAdapter(BasePlatformAdapter):
             )
         return self._group_session_manager
 
+    async def _send_group_session_notice(self, chat_id: str, text: str, kind: str) -> None:
+        """Send a deterministic awake-window notice, logging a warning if delivery fails."""
+        result = await self.send(chat_id, text)
+        if not result.success:
+            logger.warning(
+                "[%s] group-session %s notice failed for %s: %s",
+                self.name, kind, chat_id, result.error,
+            )
+
     async def _on_group_session_expire(self, chat_id: str) -> None:
-        await self.send(chat_id, self._GROUP_SESSION_EXPIRY_NOTICE)
+        await self._send_group_session_notice(chat_id, self._GROUP_SESSION_EXPIRY_NOTICE, "expiry")
 
     async def _group_session_decision(self, data: Dict[str, Any]) -> Literal["process", "swallow", "classic"]:
         """Drive the awake-window for one inbound group message.
@@ -463,7 +475,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if control == "sleep":
             if manager.is_awake(chat_id):
                 manager.close(chat_id)
-                await self.send(chat_id, self._GROUP_SESSION_SLEEP_NOTICE)
+                await self._send_group_session_notice(chat_id, self._GROUP_SESSION_SLEEP_NOTICE, "sleep")
             return "swallow"
         if control == "wake":
             # open_or_reset returns False if a stale session entry exists
@@ -472,7 +484,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
             # notice is suppressed — acceptable given the sequential poll loop.
             newly_opened = manager.open_or_reset(chat_id)
             if newly_opened:
-                await self.send(chat_id, self._group_session_wake_notice())
+                await self._send_group_session_notice(chat_id, self._group_session_wake_notice(), "wake")
             return "process"
         if manager.is_awake(chat_id):
             return "process"
