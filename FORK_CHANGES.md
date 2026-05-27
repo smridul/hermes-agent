@@ -32,8 +32,10 @@ change, update the relevant section here in the same commit.
 | `gateway/platforms/whatsapp.py` | Modified | Medium | [WhatsApp bridge install](#3-whatsapp-bridge-install-gatewayplatformswhatsapppy) |
 | `hermes_cli/web_server.py` | Modified | Medium | [Trusted-proxy gate on SPA route](#4-trusted-proxy-gate-on-the-spa-route-hermes_cliweb_serverpy) |
 | `hermes_cli/trusted_proxy.py` | New | None | [Trusted-proxy helpers](#5-trusted-proxy-helpers-new-file-hermes_clitrusted_proxypy) |
+| `agent/codex_responses_adapter.py` | Modified | Low | [OpenAI SDK None-output shim](#6-openai-sdk-noneoutput-shim-agentcodex_responses_adapterpy) |
 | `tests/gateway/test_whatsapp_connect.py` | New | None | covers (3) |
 | `tests/hermes_cli/test_trusted_proxy_dashboard.py` | New | None | covers (4)+(5) |
+| `tests/agent/test_codex_responses_none_output_shim.py` | New | None | covers (6) |
 
 "Conflict risk" means: how often upstream churns the same lines we touch.
 None = file is fork-only and cannot conflict.
@@ -163,6 +165,50 @@ Tiny module, fork-only, cannot conflict on merge. Exposes:
 
 Settings are read fresh on every call via a small dataclass — no module-
 level caching, so env changes take effect without a restart in tests.
+
+---
+
+## 6. OpenAI SDK None-output shim (`agent/codex_responses_adapter.py`)
+
+The Codex Responses backend at `chatgpt.com/backend-api/codex` intermittently
+emits stream events whose `response.output` is `null` (typically transient
+`response.queued` / `response.in_progress` / `response.incomplete` events).
+The OpenAI Python SDK's stream parser at
+`openai.lib._parsing._responses.parse_response` does
+`for output in response.output:` with no None-check, so the first event with
+a null `output` raises `TypeError: 'NoneType' object is not iterable` from
+inside `for event in stream:`. The error classifier in `run_agent.py` then
+misroutes the TypeError as a "non-retryable HTTP None client error" and
+aborts the turn — once the backend starts sending these events, **every
+reply on every session fails** until a code change ships. Confirmed in SDK
+versions 2.36.0 and 2.38.0.
+
+Module-level call to `_install_openai_responses_none_output_shim()` wraps
+the SDK's `parse_response` once at import: if `response.output is None`, it
+is mutated to `[]` before delegation. Downstream code in this same module
+(`_normalize_codex_response` and its `output_text` / stream-deltas backfill
+paths) already handles empty output gracefully, so no data is lost — the
+fix only stops the SDK from crashing at the iteration boundary. Shim is
+idempotent (marker flag on the SDK module) and fails closed when the SDK
+layout changes (silent no-op rather than crashing import).
+
+**Why it lives here:** this file is already the dumping ground for Codex
+backend quirks (tool-call leak detection, empty-output recovery, message-
+phase tracking). Keeping the workaround next to its siblings makes it
+discoverable on the next "Codex backend started doing X" report.
+
+**Upstream:** ideally a one-line `(response.output or [])` PR to
+`openai/openai-python`; a Hermes-side PR mirroring this shim is the
+faster path to merging since their codebase already carries similar
+defensive code.
+
+**Merge guidance**
+
+- Conflict risk is low — the shim sits at the top of the module right after
+  the logger setup, before any of the regex / function definitions upstream
+  is likely to touch.
+- If upstream lands an equivalent shim, drop this section and remove the
+  fork copy.
 
 ---
 

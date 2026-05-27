@@ -23,6 +23,52 @@ from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 logger = logging.getLogger(__name__)
 
 
+# ── OpenAI SDK shim: tolerate ``response.output is None`` ──────────────────
+# The Codex Responses backend at ``chatgpt.com/backend-api/codex`` intermittently
+# emits stream events whose ``response.output`` field is ``null`` (commonly seen
+# on transient ``response.queued`` / ``response.in_progress`` /
+# ``response.incomplete`` events).  The OpenAI Python SDK's stream parser at
+# ``openai.lib._parsing._responses.parse_response`` does
+# ``for output in response.output:`` with no None-check, which raises
+# ``TypeError: 'NoneType' object is not iterable`` as soon as ``for event in
+# stream:`` reaches that frame.  run_agent.py's error classifier then misroutes
+# the TypeError as a "non-retryable HTTP None client error" and aborts the
+# turn — so every reply on every session 500s until a code change is shipped.
+# Both 2.36.0 and 2.38.0 of the SDK have the unguarded iteration.
+#
+# Coerce ``response.output = []`` when it's ``None`` so the SDK's accumulator
+# proceeds cleanly.  Empty output is already handled downstream by
+# ``_normalize_codex_response`` (backfill from stream events or synthesize from
+# text deltas), so we don't lose data — we just stop blowing up at the SDK
+# boundary.  Applied once at import time; idempotent.
+def _install_openai_responses_none_output_shim() -> None:
+    try:
+        from openai.lib._parsing import _responses as _sdk_parsing
+    except Exception:
+        # SDK layout changed or openai package unavailable — nothing to shim.
+        return
+    if getattr(_sdk_parsing, "_hermes_none_output_shim_installed", False):
+        return
+    _orig_parse_response = _sdk_parsing.parse_response
+
+    def _parse_response_tolerant(*args: Any, **kwargs: Any) -> Any:
+        resp = kwargs.get("response")
+        if resp is not None and getattr(resp, "output", None) is None:
+            try:
+                resp.output = []
+            except Exception:
+                # Some SDK Response models are frozen — fall through and let
+                # the original raise so the upstream issue stays visible.
+                pass
+        return _orig_parse_response(*args, **kwargs)
+
+    _sdk_parsing.parse_response = _parse_response_tolerant
+    _sdk_parsing._hermes_none_output_shim_installed = True
+
+
+_install_openai_responses_none_output_shim()
+
+
 # Matches Codex/Harmony tool-call serialization that occasionally leaks into
 # assistant-message content when the model fails to emit a structured
 # ``function_call`` item.  Accepts the common forms:
