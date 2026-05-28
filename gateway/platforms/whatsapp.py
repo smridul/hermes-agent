@@ -376,16 +376,29 @@ class WhatsAppAdapter(BasePlatformAdapter):
         body = str(data.get("body") or "")
         return any(pattern.search(body) for pattern in self._mention_patterns)
 
-    def _clean_bot_mention_text(self, text: str, data: Dict[str, Any]) -> str:
+    def _strip_bot_mention_for_agent(self, text: str, data: Dict[str, Any]) -> str:
+        """Strip @<bot-LID> tokens and return the result, possibly empty.
+
+        Used on the inbound path before the body is forwarded to the agent.
+        A bare @-mention (the entire body is just `@<bot-LID>`) collapses to
+        "" so the model doesn't receive a stray 14-digit LID and treat it as
+        a record/file ID — see incident 2026-05-28 where a bare @<bot-LID>
+        caused file_search("<LID>") via the file-retrieval skill.
+        """
         if not text:
             return text
-        bot_ids = self._bot_ids_from_message(data)
         cleaned = text
-        for bot_id in bot_ids:
+        for bot_id in self._bot_ids_from_message(data):
             bare_id = bot_id.split("@", 1)[0]
             if bare_id:
                 cleaned = re.sub(rf"@{re.escape(bare_id)}\b[,:\-]*\s*", "", cleaned)
-        return cleaned.strip() or text
+        return cleaned.strip()
+
+    def _clean_bot_mention_text(self, text: str, data: Dict[str, Any]) -> str:
+        # Falls back to the original text when stripping empties the body,
+        # so bare @-pings still classify as "wake" in _classify_group_control.
+        # The agent dispatch path uses _strip_bot_mention_for_agent instead.
+        return self._strip_bot_mention_for_agent(text, data) or text
 
     def _should_process_message(self, data: Dict[str, Any]) -> bool:
         is_group = data.get("isGroup", False)
@@ -1224,7 +1237,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
             # Cap at 100KB to match Telegram/Discord/Slack behaviour.
             body = data.get("body", "")
             if data.get("isGroup"):
-                body = self._clean_bot_mention_text(body, data)
+                body = self._strip_bot_mention_for_agent(body, data)
             MAX_TEXT_INJECT_BYTES = 100 * 1024
             if msg_type == MessageType.DOCUMENT and cached_urls:
                 for doc_path in cached_urls:
