@@ -322,5 +322,44 @@ VOLUME [ "/opt/data" ]
 # and exec's the final program so its exit code becomes the container
 # exit code. Without the wrapper-as-ENTRYPOINT, leading-dash args
 # like `--version` would be intercepted by /init's POSIX shell.
+# ---------- Smart interactive shell (zsh) — staging dexec convenience ----------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    zsh zsh-autosuggestions zsh-syntax-highlighting fzf vim less bash-completion && \
+    rm -rf /var/lib/apt/lists/*
+RUN cat >> /etc/zsh/zshrc <<'ZEOF'
+
+if [ -d /etc/zsh/zshrc.d ]; then
+    for f in /etc/zsh/zshrc.d/*.zsh; do
+        [ -r "$f" ] && source "$f"
+    done
+    unset f
+fi
+ZEOF
+RUN mkdir -p /etc/zsh/zshrc.d && cat > /etc/zsh/zshrc.d/hermes.zsh <<'ZEOF'
+HISTFILE=$HOME/.zsh_history
+HISTSIZE=20000
+SAVEHIST=20000
+setopt INC_APPEND_HISTORY HIST_IGNORE_ALL_DUPS HIST_FIND_NO_DUPS HIST_REDUCE_BLANKS SHARE_HISTORY
+setopt AUTO_CD INTERACTIVE_COMMENTS NO_BEEP EXTENDED_GLOB
+autoload -Uz compinit && compinit -u
+zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|=*' 'l:|=* r:|=*'
+zstyle ':completion:*' menu select
+autoload -Uz history-search-end
+zle -N history-beginning-search-backward-end history-search-end
+zle -N history-beginning-search-forward-end history-search-end
+bindkey "\e[A" history-beginning-search-backward-end
+bindkey "\e[B" history-beginning-search-forward-end
+[ -r /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ] && . /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+[ -r /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ] && . /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+[ -r /usr/share/doc/fzf/examples/key-bindings.zsh ] && . /usr/share/doc/fzf/examples/key-bindings.zsh
+[ -r /usr/share/doc/fzf/examples/completion.zsh ] && . /usr/share/doc/fzf/examples/completion.zsh
+autoload -Uz colors && colors
+PROMPT='%F{green}%n@uhermes%f:%F{blue}%~%f%# '
+alias ls='ls --color=auto'
+alias ll='ls -lah'
+alias grep='grep --color=auto'
+export LESS='-R'ZEOF
+RUN chsh -s /usr/bin/zsh hermes
+
 ENTRYPOINT [ "/init", "/opt/hermes/docker/main-wrapper.sh" ]
 CMD [ "sleep", "infinity" ]
