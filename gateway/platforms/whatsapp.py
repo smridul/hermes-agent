@@ -261,12 +261,12 @@ class WhatsAppAdapter(BasePlatformAdapter):
     def _whatsapp_group_session_minutes(self) -> int:
         configured = self.config.extra.get("group_session_minutes")
         if configured is None:
-            configured = os.getenv("WHATSAPP_GROUP_SESSION_MINUTES", "15")
+            configured = os.getenv("WHATSAPP_GROUP_SESSION_MINUTES", "60")
         try:
             minutes = int(configured)
         except (TypeError, ValueError):
-            return 15
-        return minutes if minutes > 0 else 15
+            return 60
+        return minutes if minutes > 0 else 60
 
     @staticmethod
     def _coerce_allow_list(raw) -> set[str]:
@@ -428,10 +428,18 @@ class WhatsAppAdapter(BasePlatformAdapter):
         return self._message_matches_mention_patterns(data)
 
     def _group_session_wake_notice(self) -> str:
-        """Build the wake-window notice text, including the configured window length in minutes."""
+        """Build the wake-window notice text, with the duration humanised
+        (e.g. "1 hour" instead of "60 minutes" when minutes is a whole
+        number of hours)."""
+        minutes = self._group_session_minutes
+        if minutes >= 60 and minutes % 60 == 0:
+            hours = minutes // 60
+            duration = f"{hours} hour" if hours == 1 else f"{hours} hours"
+        else:
+            duration = f"{minutes} minutes"
         return (
             f"👂 I'm following this chat for the next "
-            f"{self._group_session_minutes} minutes — no need to tag me. "
+            f"{duration} — no need to tag me. "
             'Tag me with "sleep" to stop early.'
         )
 
