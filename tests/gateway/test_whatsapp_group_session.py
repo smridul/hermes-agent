@@ -86,9 +86,9 @@ def test_group_session_disabled_by_default(monkeypatch):
     assert _bare_adapter({})._whatsapp_group_session_enabled() is False
 
 
-def test_group_session_minutes_defaults_to_15(monkeypatch):
+def test_group_session_minutes_defaults_to_60(monkeypatch):
     monkeypatch.delenv("WHATSAPP_GROUP_SESSION_MINUTES", raising=False)
-    assert _bare_adapter({})._whatsapp_group_session_minutes() == 15
+    assert _bare_adapter({})._whatsapp_group_session_minutes() == 60
 
 
 def test_group_session_minutes_reads_config():
@@ -96,15 +96,15 @@ def test_group_session_minutes_reads_config():
 
 
 def test_group_session_minutes_rejects_invalid():
-    assert _bare_adapter({"group_session_minutes": "abc"})._whatsapp_group_session_minutes() == 15
+    assert _bare_adapter({"group_session_minutes": "abc"})._whatsapp_group_session_minutes() == 60
 
 
 def test_group_session_minutes_rejects_non_positive():
-    assert _bare_adapter({"group_session_minutes": 0})._whatsapp_group_session_minutes() == 15
+    assert _bare_adapter({"group_session_minutes": 0})._whatsapp_group_session_minutes() == 60
 
 
 def test_group_session_minutes_rejects_negative():
-    assert _bare_adapter({"group_session_minutes": -5})._whatsapp_group_session_minutes() == 15
+    assert _bare_adapter({"group_session_minutes": -5})._whatsapp_group_session_minutes() == 60
 
 
 # --- Task 4: message classification ---
