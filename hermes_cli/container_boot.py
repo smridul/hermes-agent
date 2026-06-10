@@ -106,6 +106,14 @@ def reconcile_profile_gateways(
     )
     default_prior_state = legacy_default_state or _read_prior_state(hermes_home)
     default_should_start = default_prior_state in _AUTOSTART_STATES
+    if not default_should_start and _gateway_autostart_forced():
+        # HERMES_GATEWAY_AUTOSTART=1 restores the pre-s6 "always run the
+        # gateway on container start" behavior: the default gateway comes up
+        # even when the last shutdown persisted "stopped" (e.g. the SIGTERM a
+        # redeploy / `docker stop` sends). Scoped to the DEFAULT gateway ONLY —
+        # the named-profile worker slots below are untouched, so this cannot
+        # reintroduce redundant per-profile gateways.
+        default_should_start = True
     if not dry_run:
         _cleanup_stale_runtime_files(hermes_home)
         _register_service(scandir, "default", start=default_should_start)
@@ -172,6 +180,16 @@ def reconcile_profile_gateways(
     if not dry_run:
         _write_reconcile_log(hermes_home, actions)
     return actions
+
+
+def _gateway_autostart_forced() -> bool:
+    """True when HERMES_GATEWAY_AUTOSTART opts the *default* gateway into
+    unconditional start-on-boot (pre-s6 "always run" behavior). Opt-in so it
+    only affects containers where always-on is wanted; never auto-starts a
+    crashed gateway across normal restarts unless explicitly enabled."""
+    return os.environ.get("HERMES_GATEWAY_AUTOSTART", "").strip().lower() in (
+        "1", "true", "yes",
+    )
 
 
 def _profile_routing_worker_targets(hermes_home: Path) -> frozenset[str]:

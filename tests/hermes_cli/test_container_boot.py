@@ -738,3 +738,53 @@ def test_no_profile_routing_config_preserves_autostart(tmp_path: Path) -> None:
     assert actions == [ReconcileAction(
         profile="coder", prior_state="running", action="started",
     )]
+
+
+# ---------------------------------------------------------------------------
+# HERMES_GATEWAY_AUTOSTART: force the DEFAULT gateway up even when persisted
+# state is "stopped" (redeploy SIGTERM) — WITHOUT reintroducing per-profile
+# gateways for routing workers.
+# ---------------------------------------------------------------------------
+
+
+def test_autostart_env_starts_default_despite_stopped(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_GATEWAY_AUTOSTART", "true")
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _seed_default_root(tmp_path, state="stopped")  # last shutdown persisted stopped
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path, scandir=scandir, dry_run=False,
+    )
+    default = [a for a in actions if a.profile == "default"][0]
+    assert default.action == "started"            # forced up
+    assert not (scandir / "gateway-default" / "down").exists()
+
+
+def test_autostart_env_does_NOT_start_per_profile_workers(tmp_path, monkeypatch) -> None:
+    """The autostart override is scoped to the default gateway: routing-worker
+    profiles stay registered-down even with HERMES_GATEWAY_AUTOSTART set, so it
+    cannot reintroduce the redundant per-profile gateway problem."""
+    monkeypatch.setenv("HERMES_GATEWAY_AUTOSTART", "1")
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _seed_default_root(tmp_path, state="stopped")
+    _write_root_config(tmp_path, profiles=["default", "megha-bot"])
+    _make_profile(tmp_path, "megha-bot", state="running")   # routing worker
+
+    actions = {a.profile: a.action for a in reconcile_profile_gateways(
+        hermes_home=tmp_path, scandir=scandir, dry_run=False,
+    )}
+    assert actions["default"] == "started"        # default forced up
+    assert actions["megha-bot"] == "registered"   # worker STILL down (no multi-gateway)
+    assert (scandir / "gateway-megha-bot" / "down").exists()
+
+
+def test_no_autostart_env_keeps_stopped_default_down(tmp_path) -> None:
+    """Control: without the env, a stopped default stays down (unchanged)."""
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _seed_default_root(tmp_path, state="stopped")
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path, scandir=scandir, dry_run=False,
+    )
+    default = [a for a in actions if a.profile == "default"][0]
+    assert default.action == "registered"
+    assert (scandir / "gateway-default" / "down").exists()
