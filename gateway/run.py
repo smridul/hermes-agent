@@ -1870,6 +1870,20 @@ class GatewayRunner:
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
+    # WhatsApp profile-routing defaults (None == feature disabled).
+    # Class-level so tests that build GatewayRunner via object.__new__()
+    # without running __init__ don't crash when stop() / _handle_message
+    # / _spawn_profile_workers reference these attributes.
+    profile_worker_manager: Optional[Any] = None
+    whatsapp_router: Optional[Any] = None
+    primary_profile_name: str = "default"
+    _profile_routing: Optional[Any] = None
+    # Stale-code self-check defaults (see _detect_stale_code()).  Class-level
+    # so tests that construct GatewayRunner via ``object.__new__`` without
+    # running __init__ don't crash when _handle_message reads these.
+    _boot_wall_time: float = 0.0
+    _boot_repo_mtime: float = 0.0
+    _stale_code_restart_triggered: bool = False
 
     def __init__(self, config: Optional[GatewayConfig] = None):
         global _gateway_runner_ref
@@ -2099,6 +2113,183 @@ class GatewayRunner:
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+
+        # ── WhatsApp sender-based profile routing (optional) ────────────
+        # When configured, ingress spawns one Hermes worker subprocess per
+        # non-primary profile listed in ``whatsapp.profile_routing.profiles``.
+        # Routed inbound WhatsApp messages are forwarded to the appropriate
+        # worker; replies travel back through ingress's WhatsApp adapter.
+        self._profile_routing = getattr(
+            self.config, "whatsapp_profile_routing", None
+        )
+        self.profile_worker_manager = None  # populated in start() if routing
+        self.whatsapp_router = None
+        self.primary_profile_name: str = self._resolve_primary_profile_name()
+        if self._profile_routing is not None:
+            from gateway.profile_worker_manager import ProfileWorkerManager
+            from gateway.whatsapp_router import WhatsAppRouter
+
+            self.profile_worker_manager = ProfileWorkerManager()
+            self.whatsapp_router = WhatsAppRouter(self._profile_routing)
+
+    def _resolve_primary_profile_name(self) -> str:
+        """Return the profile name corresponding to this gateway's HERMES_HOME.
+
+        Profiles live at ``<root>/profiles/<name>``.  If HERMES_HOME points
+        directly at the root (no profile subdir), returns ``"default"``.
+        """
+        try:
+            from hermes_constants import get_default_hermes_root, get_hermes_home
+            home = get_hermes_home().resolve()
+            root = (get_default_hermes_root() / "profiles").resolve()
+            try:
+                rel = home.relative_to(root)
+            except ValueError:
+                return "default"
+            parts = rel.parts
+            return parts[0] if parts else "default"
+        except Exception:
+            return "default"
+
+    async def _spawn_profile_workers(self) -> None:
+        """Spawn one ProfileWorker subprocess per non-primary profile.
+
+        Called from :meth:`start` when ``whatsapp_profile_routing`` is
+        configured.  The primary profile is handled in-process and is not
+        spawned as a worker.  Failures are logged at the manager level.
+        """
+        if self._profile_routing is None or self.profile_worker_manager is None:
+            return
+
+        from gateway.profile_worker_manager import WorkerSpec
+
+        worker_argv = [sys.executable, "-m", "hermes_cli.main", "profile-worker"]
+        specs: list[WorkerSpec] = []
+        for profile_name in self._profile_routing.profiles:
+            if profile_name == self.primary_profile_name:
+                continue
+            specs.append(
+                WorkerSpec(
+                    name=profile_name,
+                    argv=worker_argv + ["--name", profile_name],
+                    # Workers re-set HERMES_HOME themselves (see
+                    # hermes_cli/profile_worker_cli.py); the inherited env
+                    # is otherwise plumbed through verbatim.
+                    env={**os.environ},
+                )
+            )
+        if specs:
+            logger.info(
+                "Spawning %d profile worker subprocess(es): %s",
+                len(specs),
+                [s.name for s in specs],
+            )
+            await self.profile_worker_manager.start(specs)
+
+    async def _dispatch_to_worker(
+        self, target_profile: str, event: MessageEvent
+    ) -> Optional[str]:
+        """Forward a routed WhatsApp event to the named profile worker.
+
+        Reply text is delivered through ingress's in-process WhatsApp
+        adapter; this method always returns ``None`` (the platform
+        adapter has nothing further to send).
+        """
+        if self.profile_worker_manager is None:
+            logger.error(
+                "profile_routing: dispatch requested for %r but no manager",
+                target_profile,
+            )
+            return None
+
+        from gateway.message_event_codec import encode_event
+
+        encoded = encode_event(event)
+        try:
+            reply = await self.profile_worker_manager.dispatch(
+                target_profile, encoded
+            )
+        except Exception as exc:
+            # MVP: silently drop on dispatch failure.  See spec §7 Q1.
+            logger.error(
+                "profile_routing: dispatch to worker %r failed: %s",
+                target_profile,
+                exc,
+            )
+            return None
+
+        text = reply.get("text") if isinstance(reply, dict) else None
+        error = reply.get("error") if isinstance(reply, dict) else None
+        if error:
+            logger.warning(
+                "profile_routing: worker %r returned error: %s",
+                target_profile,
+                error,
+            )
+            return None
+        if not text:
+            return None  # worker chose not to reply — nothing to send
+
+        adapter = self.adapters.get(Platform.WHATSAPP)
+        if adapter is None:
+            logger.error(
+                "profile_routing: WhatsApp adapter missing; cannot deliver reply"
+            )
+            return None
+        chat_id = event.source.chat_id if event.source else None
+        if not chat_id:
+            logger.error(
+                "profile_routing: event has no chat_id; cannot deliver reply"
+            )
+            return None
+        # Worker replies may embed MEDIA:<path> tags (TTS), markdown image
+        # URLs (![alt](https://…)) and [[audio_as_voice]] directives.  The
+        # non-routed pipeline in gateway/platforms/base.py extracts these
+        # and ships them as native attachments; the IPC path bypassed that
+        # entirely, so raw tags / URLs ended up sent as plain text.  Mirror
+        # the same flow here.
+        text_clean = text
+        images: list = []
+        try:
+            _, text_clean = adapter.extract_media(text_clean)
+            images, text_clean = adapter.extract_images(text_clean)
+            text_clean = text_clean.replace("[[audio_as_voice]]", "").strip()
+            text_clean = re.sub(r"MEDIA:\s*\S+", "", text_clean).strip()
+        except Exception as e:
+            logger.warning(
+                "profile_routing: media extraction failed: %s", e
+            )
+
+        if images:
+            try:
+                await adapter.send_multiple_images(
+                    chat_id=chat_id,
+                    images=images,
+                )
+            except Exception as e:
+                logger.warning(
+                    "profile_routing: image delivery failed: %s", e
+                )
+
+        # Always invoke media delivery — _deliver_media_from_response is a
+        # no-op when no MEDIA: tags or bare local file paths are present.
+        try:
+            await self._deliver_media_from_response(text, event, adapter)
+        except Exception as e:
+            logger.warning(
+                "profile_routing: media delivery failed: %s", e
+            )
+
+        if text_clean:
+            try:
+                await adapter.send(
+                    chat_id, text_clean, reply_to=event.message_id
+                )
+            except Exception as exc:
+                logger.error(
+                    "profile_routing: WhatsApp adapter.send failed: %s", exc
+                )
+        return None
 
 
     def _wire_teams_pipeline_runtime(self) -> None:
@@ -4545,7 +4736,18 @@ class GatewayRunner:
         enabled_platform_count = 0
         startup_nonretryable_errors: list[str] = []
         startup_retryable_errors: list[str] = []
-        
+
+        # ── Spawn profile worker subprocesses (if routing configured) ────
+        # Workers must be ready BEFORE any platform adapter accepts inbound
+        # messages, otherwise the first routed event would race against
+        # worker startup.  Workers for the primary profile are NOT spawned
+        # — primary handles its own messages in-process.
+        if (
+            self._profile_routing is not None
+            and self.profile_worker_manager is not None
+        ):
+            await self._spawn_profile_workers()
+
         # Initialize and connect each configured platform
         for platform, platform_config in self.config.platforms.items():
             if not platform_config.enabled:
@@ -6649,6 +6851,20 @@ class GatewayRunner:
                     )
                     self._cleanup_agent_resources(_agent)
 
+            # Stop profile workers BEFORE the WhatsApp adapter so any
+            # in-flight dispatch futures are rejected cleanly first; otherwise
+            # workers could be reaped mid-write and leave dispatch tasks
+            # hanging on closed pipes.  ``getattr`` keeps this defensive
+            # against fake/partially-constructed gateway objects used in
+            # other test files (test_shutdown_cache_cleanup, etc.).
+            _worker_mgr = getattr(self, "profile_worker_manager", None)
+            if _worker_mgr is not None:
+                try:
+                    await _worker_mgr.shutdown()
+                    logger.info("✓ profile workers stopped")
+                except Exception as e:
+                    logger.error("✗ profile worker shutdown error: %s", e)
+
             for platform, adapter in list(self.adapters.items()):
                 _adapter_started_at = time.monotonic()
                 try:
@@ -6885,6 +7101,10 @@ class GatewayRunner:
                 logger.warning("WhatsApp: Node.js not installed or bridge not configured")
                 return None
             return WhatsAppAdapter(config)
+
+        elif platform == Platform.IPC:
+            from gateway.platforms.ipc import IPCPlatformAdapter
+            return IPCPlatformAdapter(config)
         
         elif platform == Platform.SLACK:
             from gateway.platforms.slack import SlackAdapter, check_slack_requirements
@@ -7427,7 +7647,7 @@ class GatewayRunner:
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
-        
+
         This is the core message processing pipeline:
         1. Check user authorization
         2. Check for commands (/new, /reset, etc.)
@@ -7438,6 +7658,66 @@ class GatewayRunner:
         7. Return response
         """
         source = event.source
+
+        # ── WhatsApp profile routing ───────────────────────────────────
+        # Group-based routing takes precedence and is *exclusive*: a chat
+        # listed in group_profile_map binds to its target profile only —
+        # we never fall back to sender routing or default_profile from a
+        # bound group.  Sender-based routing (the existing path) handles
+        # DMs and unmapped groups.
+        if (
+            source is not None
+            and source.platform == Platform.WHATSAPP
+            and self.whatsapp_router is not None
+            and self.profile_worker_manager is not None
+        ):
+            group_target: Optional[str] = None
+            if source.chat_type == "group" and source.chat_id:
+                group_target = self.whatsapp_router.resolve_group(source.chat_id)
+
+            if group_target is not None:
+                # Group is exclusively bound — handle and return without
+                # consulting sender routing.
+                if group_target == self.primary_profile_name:
+                    # Bound to primary; fall through to in-process pipeline below.
+                    pass
+                elif self.profile_worker_manager.has_worker(group_target):
+                    return await self._dispatch_to_worker(group_target, event)
+                else:
+                    logger.error(
+                        "group_routing: chat=%s target=%s worker_unavailable; "
+                        "dropping message",
+                        source.chat_id,
+                        group_target,
+                    )
+                    return None
+            else:
+                target_profile = self.whatsapp_router.resolve_profile(
+                    event.canonical_sender_id or ""
+                )
+                if target_profile != self.primary_profile_name:
+                    return await self._dispatch_to_worker(target_profile, event)
+
+        # Stale-code self-check (Issue #17648).  A gateway that survives
+        # ``hermes update`` keeps old modules cached in sys.modules; the
+        # first inbound message is our earliest safe chance to detect
+        # this and restart gracefully before we dispatch to the agent
+        # and hit ImportError on freshly-added names (e.g. cfg_get).
+        # Idempotent — runs the real check at most once per message, and
+        # request_restart() no-ops after the first call.
+        try:
+            if self._detect_stale_code():
+                self._trigger_stale_code_restart()
+                # Acknowledge to the user so they don't see a silent
+                # drop; the gateway will be back up in a moment via the
+                # service manager / profile-watcher respawn.
+                return (
+                    "⟳ Gateway code was updated in the background — "
+                    "restarting this gateway so your next message runs "
+                    "on the new code. Please retry in a moment."
+                )
+        except Exception as _stale_exc:
+            logger.debug("Stale-code self-check failed: %s", _stale_exc)
 
         # Internal events (e.g. background-process completion notifications)
         # are system-generated and must skip user authorization.

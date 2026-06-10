@@ -27,11 +27,37 @@ import subprocess
 
 _IS_WINDOWS = platform.system() == "Windows"
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, Literal, Optional, Any
 
 from hermes_constants import get_hermes_dir
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_BRIDGE_INSTALL_TIMEOUT_SECONDS = 300
+
+
+def _bridge_install_timeout_seconds() -> int:
+    """Resolve the npm dependency install timeout for the WhatsApp bridge."""
+    raw = os.getenv("WHATSAPP_BRIDGE_INSTALL_TIMEOUT", "").strip()
+    if raw:
+        try:
+            timeout = int(float(raw))
+            if timeout > 0:
+                return timeout
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid WHATSAPP_BRIDGE_INSTALL_TIMEOUT=%r; using %ss",
+                raw,
+                _DEFAULT_BRIDGE_INSTALL_TIMEOUT_SECONDS,
+            )
+    return _DEFAULT_BRIDGE_INSTALL_TIMEOUT_SECONDS
+
+
+def _bridge_install_command(bridge_dir: Path) -> list[str]:
+    """Prefer deterministic lockfile installs when available."""
+    if (bridge_dir / "package-lock.json").exists():
+        return ["npm", "ci", "--silent", "--no-audit", "--no-fund"]
+    return ["npm", "install", "--silent"]
 
 
 def _kill_port_process(port: int) -> None:
@@ -189,6 +215,8 @@ from gateway.platforms.base import (
     cache_image_from_url,
     cache_audio_from_url,
 )
+from gateway.whatsapp_identity import canonical_whatsapp_identifier
+from gateway.platforms.group_session import GroupSessionManager, is_sleep_command
 
 
 def check_whatsapp_requirements() -> bool:
@@ -247,6 +275,13 @@ class WhatsAppAdapter(BasePlatformAdapter):
     # Default bridge location relative to the hermes-agent install
     _DEFAULT_BRIDGE_DIR = Path(__file__).resolve().parents[2] / "scripts" / "whatsapp-bridge"
 
+    _GROUP_SESSION_SLEEP_NOTICE = (
+        "😴 Going quiet. Tag me again whenever you want me back."
+    )
+    _GROUP_SESSION_EXPIRY_NOTICE = (
+        "⌛ I've stopped following the chat. Tag me to talk again."
+    )
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WHATSAPP)
         self._bridge_process: Optional[subprocess.Popen] = None
@@ -295,6 +330,12 @@ class WhatsAppAdapter(BasePlatformAdapter):
         )
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
+
+        # Group awake-window: an @-mention opens a timed window during which
+        # every group message is processed untagged. See group_session.py.
+        self._group_session_window: bool = self._whatsapp_group_session_enabled()
+        self._group_session_minutes: int = self._whatsapp_group_session_minutes()
+        self._group_session_manager: Optional[GroupSessionManager] = None
 
     def _coerce_float_extra(self, key: str, default: float) -> float:
         """Read a float from ``config.extra``, guarding against bad/non-finite values.
@@ -349,6 +390,24 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
         return {part.strip() for part in str(raw).split(",") if part.strip()}
+
+    def _whatsapp_group_session_enabled(self) -> bool:
+        configured = self.config.extra.get("group_session_window")
+        if configured is not None:
+            if isinstance(configured, str):
+                return configured.lower() in ("true", "1", "yes", "on")
+            return bool(configured)
+        return os.getenv("WHATSAPP_GROUP_SESSION_WINDOW", "false").lower() in ("true", "1", "yes", "on")
+
+    def _whatsapp_group_session_minutes(self) -> int:
+        configured = self.config.extra.get("group_session_minutes")
+        if configured is None:
+            configured = os.getenv("WHATSAPP_GROUP_SESSION_MINUTES", "60")
+        try:
+            minutes = int(configured)
+        except (TypeError, ValueError):
+            return 60
+        return minutes if minutes > 0 else 60
 
     @staticmethod
     def _coerce_allow_list(raw) -> set[str]:
@@ -437,10 +496,11 @@ class WhatsAppAdapter(BasePlatformAdapter):
     def _normalize_whatsapp_id(value: Optional[str]) -> str:
         if not value:
             return ""
-        normalized = str(value).strip()
-        if ":" in normalized and "@" in normalized:
-            normalized = normalized.replace(":", "@", 1)
-        return normalized
+        # Strip Baileys' ":<device>" suffix from JIDs (e.g. "14082287857:10@s.whatsapp.net"
+        # → "14082287857@s.whatsapp.net"). Quoted-participant / mentioned-JID fields from
+        # WhatsApp arrive without it, so bot identity must be stripped to the same shape
+        # for reply-to-bot and mention comparisons.
+        return re.sub(r":\d+@", "@", str(value).strip())
 
     def _bot_ids_from_message(self, data: Dict[str, Any]) -> set[str]:
         bot_ids = set()
@@ -482,16 +542,29 @@ class WhatsAppAdapter(BasePlatformAdapter):
         body = str(data.get("body") or "")
         return any(pattern.search(body) for pattern in self._mention_patterns)
 
-    def _clean_bot_mention_text(self, text: str, data: Dict[str, Any]) -> str:
+    def _strip_bot_mention_for_agent(self, text: str, data: Dict[str, Any]) -> str:
+        """Strip @<bot-LID> tokens and return the result, possibly empty.
+
+        Used on the inbound path before the body is forwarded to the agent.
+        A bare @-mention (the entire body is just `@<bot-LID>`) collapses to
+        "" so the model doesn't receive a stray 14-digit LID and treat it as
+        a record/file ID — see incident 2026-05-28 where a bare @<bot-LID>
+        caused file_search("<LID>") via the file-retrieval skill.
+        """
         if not text:
             return text
-        bot_ids = self._bot_ids_from_message(data)
         cleaned = text
-        for bot_id in bot_ids:
+        for bot_id in self._bot_ids_from_message(data):
             bare_id = bot_id.split("@", 1)[0]
             if bare_id:
                 cleaned = re.sub(rf"@{re.escape(bare_id)}\b[,:\-]*\s*", "", cleaned)
-        return cleaned.strip() or text
+        return cleaned.strip()
+
+    def _clean_bot_mention_text(self, text: str, data: Dict[str, Any]) -> str:
+        # Falls back to the original text when stripping empties the body,
+        # so bare @-pings still classify as "wake" in _classify_group_control.
+        # The agent dispatch path uses _strip_bot_mention_for_agent instead.
+        return self._strip_bot_mention_for_agent(text, data) or text
 
     def _should_process_message(self, data: Dict[str, Any]) -> bool:
         chat_id_raw = str(data.get("chatId") or "")
@@ -526,7 +599,114 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if self._message_mentions_bot(data):
             return True
         return self._message_matches_mention_patterns(data)
-    
+
+    def _group_session_wake_notice(self) -> str:
+        """Build the wake-window notice text, with the duration humanised
+        (e.g. "1 hour" instead of "60 minutes" when minutes is a whole
+        number of hours)."""
+        minutes = self._group_session_minutes
+        if minutes >= 60 and minutes % 60 == 0:
+            hours = minutes // 60
+            duration = f"{hours} hour" if hours == 1 else f"{hours} hours"
+        else:
+            duration = f"{minutes} minutes"
+        return (
+            f"👂 I'm following this chat for the next "
+            f"{duration} — no need to tag me. "
+            'Tag me with "sleep" to stop early.'
+        )
+
+    def _classify_group_control(self, data: Dict[str, Any]) -> Optional[Literal["wake", "sleep"]]:
+        """Classify a group message as an awake-window control message.
+
+        Returns "wake" if the message @-mentions the agent, "sleep" if it
+        @-mentions the agent and its mention-stripped body is exactly a
+        sleep command, or None if it is neither.
+        """
+        if not self._message_mentions_bot(data):
+            return None
+        body = str(data.get("body") or "")
+        # _clean_bot_mention_text returns the ORIGINAL body when stripping the
+        # mention would empty it, so a bare "@bot" ping cleans to "@bot" (not
+        # "") and correctly classifies as "wake", never "sleep".
+        cleaned = self._clean_bot_mention_text(body, data)
+        if is_sleep_command(cleaned):
+            return "sleep"
+        return "wake"
+
+    def _ensure_group_session_manager(self) -> GroupSessionManager:
+        """Lazily construct the GroupSessionManager on first call; must not be invoked before the event loop is running."""
+        if self._group_session_manager is None:
+            self._group_session_manager = GroupSessionManager(
+                window_seconds=self._group_session_minutes * 60,
+                on_expire=self._on_group_session_expire,
+            )
+        return self._group_session_manager
+
+    async def _send_group_session_notice(self, chat_id: str, text: str, kind: str) -> None:
+        """Send a deterministic awake-window notice, logging a warning if delivery fails."""
+        result = await self.send(chat_id, text)
+        if not result.success:
+            logger.warning(
+                "[%s] group-session %s notice failed for %s: %s",
+                self.name, kind, chat_id, result.error,
+            )
+
+    async def _on_group_session_expire(self, chat_id: str) -> None:
+        await self._send_group_session_notice(chat_id, self._GROUP_SESSION_EXPIRY_NOTICE, "expiry")
+
+    async def _group_session_decision(self, data: Dict[str, Any]) -> Literal["process", "swallow", "classic"]:
+        """Drive the awake-window for one inbound group message.
+
+        Returns one of:
+          "process" — the awake window is open (or just opened); process it.
+          "swallow" — this was a sleep command; do not process it.
+          "classic" — no window involvement; defer to _should_process_message.
+        """
+        manager = self._ensure_group_session_manager()
+        chat_id = str(data.get("chatId") or "")
+        control = self._classify_group_control(data)
+        if control == "sleep":
+            if manager.is_awake(chat_id):
+                manager.close(chat_id)
+                await self._send_group_session_notice(chat_id, self._GROUP_SESSION_SLEEP_NOTICE, "sleep")
+            return "swallow"
+        if control == "wake":
+            # open_or_reset returns False if a stale session entry exists
+            # whose expiry task has fired its sleep but not yet popped the
+            # entry (~one poll-loop tick). In that narrow window the wake
+            # notice is suppressed — acceptable given the sequential poll loop.
+            newly_opened = manager.open_or_reset(chat_id)
+            if newly_opened:
+                await self._send_group_session_notice(chat_id, self._group_session_wake_notice(), "wake")
+            return "process"
+        if manager.is_awake(chat_id):
+            return "process"
+        return "classic"
+
+    async def _passes_inbound_gate(self, data: Dict[str, Any]) -> bool:
+        """Decide whether an inbound message should be processed.
+
+        Wraps the classic _should_process_message gate with the group
+        awake-window. DMs and the feature-off path are unchanged.
+        """
+        if not data.get("isGroup", False):
+            return self._should_process_message(data)
+        chat_id = str(data.get("chatId") or "")
+        if not self._is_group_allowed(chat_id):
+            return False
+        if self._group_session_window:
+            decision = await self._group_session_decision(data)
+            if decision == "swallow":
+                return False
+            if decision == "process":
+                return True
+            # decision == "classic" — fall through to the classic gate
+        # _is_group_allowed already rejected disallowed groups above; the
+        # early guard protects the session manager. _should_process_message
+        # re-checks it harmlessly, then applies the classic mention rules.
+        return self._should_process_message(data)
+
     async def connect(self) -> bool:
         """
         Start the WhatsApp bridge.
@@ -595,18 +775,17 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 # plain executable path.
                 _npm_bin = shutil.which("npm") or "npm"
                 try:
-                    # Read timeout from environment variable, default to 300 seconds (5 minutes)
-                    # to accommodate slower systems like Unraid NAS
-                    npm_install_timeout = int(os.environ.get("WHATSAPP_NPM_INSTALL_TIMEOUT", "300"))
+                    install_cmd = _bridge_install_command(bridge_dir)
+                    install_timeout = _bridge_install_timeout_seconds()
                     install_result = subprocess.run(
-                        [_npm_bin, "install", "--silent"],
+                        install_cmd,
                         cwd=str(bridge_dir),
                         capture_output=True,
                         text=True,
-                        timeout=npm_install_timeout,
+                        timeout=install_timeout,
                     )
                     if install_result.returncode != 0:
-                        print(f"[{self.name}] npm install failed: {install_result.stderr}")
+                        print(f"[{self.name}] Dependency install failed: {install_result.stderr}")
                         return False
                     print(f"[{self.name}] Dependencies installed")
                 except Exception as e:
@@ -1056,6 +1235,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
         image_url: str,
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
+        **kwargs,
     ) -> SendResult:
         """Download image URL to cache, send natively via bridge."""
         try:
@@ -1260,7 +1440,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
     async def _build_message_event(self, data: Dict[str, Any]) -> Optional[MessageEvent]:
         """Build a MessageEvent from bridge message data, downloading images to cache."""
         try:
-            if not self._should_process_message(data):
+            if not await self._passes_inbound_gate(data):
                 return None
 
             # Determine message type
@@ -1345,7 +1525,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
             # Cap at 100KB to match Telegram/Discord/Slack behaviour.
             body = data.get("body", "")
             if data.get("isGroup"):
-                body = self._clean_bot_mention_text(body, data)
+                body = self._strip_bot_mention_for_agent(body, data)
             MAX_TEXT_INJECT_BYTES = 100 * 1024
             if msg_type == MessageType.DOCUMENT and cached_urls:
                 for doc_path in cached_urls:
@@ -1373,6 +1553,13 @@ class WhatsAppAdapter(BasePlatformAdapter):
                         except Exception as e:
                             print(f"[{self.name}] Failed to read document text: {e}", flush=True)
 
+            sender_id_raw = data.get("senderId") or ""
+            canonical_sender_id = (
+                canonical_whatsapp_identifier(sender_id_raw)
+                if sender_id_raw
+                else None
+            )
+
             return MessageEvent(
                 text=body,
                 message_type=msg_type,
@@ -1381,6 +1568,9 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 message_id=data.get("messageId"),
                 media_urls=cached_urls,
                 media_types=media_types,
+                canonical_sender_id=canonical_sender_id or None,
+                reply_to_message_id=(data.get("quotedMessageId") or None),
+                reply_to_text=(data.get("quotedText") or None),
             )
         except Exception as e:
             print(f"[{self.name}] Error building event: {e}")

@@ -19,6 +19,8 @@ from enum import Enum
 from hermes_cli.config import get_hermes_home
 from utils import is_truthy_value
 
+from gateway.profile_routing_config import ProfileRoutingConfigError
+
 logger = logging.getLogger(__name__)
 
 
@@ -127,6 +129,7 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    IPC = "ipc"
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -452,6 +455,10 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
         (cfg.extra.get("client_id") or os.getenv("DINGTALK_CLIENT_ID"))
         and (cfg.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET"))
     ),
+    # IPC is the worker-side adapter for sender-based profile routing.
+    # No external auth — if the gateway has enabled it, it's "connected"
+    # by virtue of having an open stdin pipe.
+    Platform.IPC: lambda cfg: True,
 }
 
 
@@ -498,6 +505,14 @@ class GatewayConfig:
 
     # Unauthorized DM policy
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
+
+    # WhatsApp sender-based profile routing (optional).  When set, ingress
+    # spawns one Hermes worker subprocess per non-primary profile listed in
+    # the routing config.  Routed inbound WhatsApp messages dispatch to the
+    # right worker; replies travel back through ingress's WhatsApp adapter.
+    # See gateway/profile_routing_config.py and the design doc at
+    # docs/superpowers/specs/2026-05-07-whatsapp-sender-profile-routing-design.md.
+    whatsapp_profile_routing: Optional["ProfileRoutingConfig"] = None
 
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
@@ -727,6 +742,7 @@ def load_gateway_config() -> GatewayConfig:
             logger.warning("Failed to load %s: %s", gateway_json_path, e)
 
     # Primary source: config.yaml
+    _parsed_whatsapp_routing = None
     try:
         import yaml
         config_yaml_path = _home / "config.yaml"
@@ -1122,6 +1138,17 @@ def load_gateway_config() -> GatewayConfig:
                     if isinstance(gaf, list):
                         gaf = ",".join(str(v) for v in gaf)
                     os.environ["WHATSAPP_GROUP_ALLOWED_USERS"] = str(gaf)
+                # Sender-based profile routing.  Parsing/validation (canonical
+                # IDs, default-in-profiles, no duplicates, ...) lives in
+                # gateway/profile_routing_config.py so this loader stays thin.
+                # Captured into _parsed_whatsapp_routing here, attached to the
+                # GatewayConfig instance AFTER it's constructed below — the
+                # ``config`` variable doesn't exist yet at this point.
+                if "profile_routing" in whatsapp_cfg:
+                    from gateway.profile_routing_config import parse_profile_routing
+                    _parsed_whatsapp_routing = parse_profile_routing(
+                        whatsapp_cfg.get("profile_routing")
+                    )
 
             # Signal settings → env vars (env vars take precedence)
             signal_cfg = yaml_cfg.get("signal", {})
@@ -1183,6 +1210,12 @@ def load_gateway_config() -> GatewayConfig:
                 if "allow_bots" in feishu_cfg and not os.getenv("FEISHU_ALLOW_BOTS"):
                     os.environ["FEISHU_ALLOW_BOTS"] = str(feishu_cfg["allow_bots"]).lower()
 
+    except ProfileRoutingConfigError:
+        # Profile routing is a security boundary — silently falling back
+        # would let messages from restricted senders be processed by the
+        # in-process default profile, leaking its tools/MCP servers to
+        # numbers the operator intended to sandbox. Fail closed instead.
+        raise
     except Exception as e:
         logger.warning(
             "Failed to process config.yaml — falling back to .env / gateway.json values. "
@@ -1192,6 +1225,12 @@ def load_gateway_config() -> GatewayConfig:
         )
 
     config = GatewayConfig.from_dict(gw_data)
+
+    # Attach the parsed WhatsApp profile-routing config (parsed inside
+    # the try-block above and held in a function-scoped local).  Stays
+    # None when routing isn't configured or yaml parsing failed.
+    if _parsed_whatsapp_routing is not None:
+        config.whatsapp_profile_routing = _parsed_whatsapp_routing
 
     # Override with environment variables
     _apply_env_overrides(config)

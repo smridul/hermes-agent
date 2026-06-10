@@ -105,6 +105,28 @@ def test_invalid_regex_patterns_are_ignored():
     assert adapter._should_process_message(_group_message("hello everyone")) is False
 
 
+def test_device_suffixed_bot_ids_match_reply_and_mention():
+    # Baileys ships sock.user.id / sock.user.lid with a ":<device>" suffix
+    # (e.g. "14082287857:10@s.whatsapp.net"). WhatsApp's contextInfo.participant
+    # and mentionedJid arrive *without* it, so the normalizer must strip the
+    # device suffix or reply-to-bot and mention comparisons silently fail.
+    adapter = _make_adapter(require_mention=True)
+
+    msg = _group_message(
+        "replying",
+        botIds=["14082287857:10@s.whatsapp.net", "58957737549834:10@lid"],
+        quotedParticipant="58957737549834@lid",
+    )
+    assert adapter._should_process_message(msg) is True
+
+    mention = _group_message(
+        "hi there",
+        botIds=["14082287857:10@s.whatsapp.net", "58957737549834:10@lid"],
+        mentionedIds=["58957737549834@lid"],
+    )
+    assert adapter._should_process_message(mention) is True
+
+
 def test_config_bridges_whatsapp_group_settings(monkeypatch, tmp_path):
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()

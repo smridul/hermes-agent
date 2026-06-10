@@ -60,6 +60,10 @@ from hermes_cli.config import (
     recommended_update_command_for_method,
     redact_key,
 )
+from hermes_cli.trusted_proxy import (
+    has_valid_trusted_proxy_header,
+    trusted_proxy_unauthorized_response,
+)
 from gateway.status import get_running_pid, read_runtime_status
 from utils import env_var_enabled
 
@@ -8788,6 +8792,8 @@ def mount_spa(application: FastAPI):
             and file_path.is_file()
         ):
             return FileResponse(file_path)
+        if not has_valid_trusted_proxy_header(request):
+            return trusted_proxy_unauthorized_response()
         return _serve_index(prefix)
 
 

@@ -1,0 +1,395 @@
+# HANDOFF.md
+
+## Completed (2026-05-19): WhatsApp group awake-window
+
+### Feature
+In a WhatsApp group with `require_mention: true`, an @-mention of the agent opens a
+15-minute **awake window** during which the agent answers every message — even untagged
+ones. Re-mentioning resets the 15-min timer. A message that @-mentions the agent and
+whose mention-stripped body is exactly a sleep keyword (`sleep`, `stop`, `go to sleep`,
+`sleep now`, `stop listening`, `quiet`) closes the window early. The agent posts a wake
+notice when the window opens, a sleep notice when closed early, and an expiry notice when
+the timer runs out. State is in-memory — a gateway restart reverts to mention-required.
+The feature is **opt-in** (off by default); other profiles are unaffected.
+
+### New module
+`gateway/platforms/group_session.py` — `SLEEP_KEYWORDS`, `is_sleep_command()`,
+`GroupSession` dataclass, `GroupSessionManager` (per-group timer/state core with asyncio
+expiry tasks).
+
+### Adapter changes (`gateway/platforms/whatsapp.py`)
+Added config readers, `_classify_group_control`, `_group_session_decision`,
+`_passes_inbound_gate` (the new inbound gate, wired into `_build_message_event`). The
+classic `_should_process_message` is unchanged — zero behavior change when the feature is
+off.
+
+### Config keys (in the `whatsapp:` config block)
+- `group_session_window` (bool, default **false** — opt-in) — env fallback
+  `WHATSAPP_GROUP_SESSION_WINDOW`
+- `group_session_minutes` (int, default **15**) — env fallback
+  `WHATSAPP_GROUP_SESSION_MINUTES`
+
+### Spec & plan
+- `docs/superpowers/specs/2026-05-19-whatsapp-group-awake-window-design.md`
+- `docs/superpowers/plans/2026-05-19-whatsapp-group-awake-window.md`
+
+### Tests
+- `tests/gateway/test_group_session.py` — 12/12 passed
+- `tests/gateway/test_whatsapp_group_session.py` — 29/29 passed
+- `tests/gateway/test_whatsapp_group_gating.py` (pre-existing classic-gate suite) — 23/23
+  passed (unchanged behavior confirmed)
+- Full `tests/gateway/` run: 4542 passed, 74 skipped, 14 failures — all 14 failures are
+  pre-existing (DingTalk AI-card, Feishu bot-identity, Teams send-typing,
+  blocking-approval E2E); none involve WhatsApp or group_session files.
+
+### Deploy / activation
+Standard source-only flow: commit + push, then Coolify rebuild of `eureka-hermes`. To
+**activate** the feature, set `group_session_window: true` in the group's profile
+`config.yaml`. Other profiles remain unaffected (default is `false`).
+
+---
+
+## Completed (2026-05-18): MCP `acting_user` confused-deputy fix
+
+### Bug
+When a non-owner WhatsApp sender (e.g. "Deep") DMed the eureka-hermes bot
+and asked for a private file, the deep MCP server (file_search /
+file_get) returned the owner's private files. Audit logs on the MCP side
+showed `acting_user='mridul'` even though the inbound was from Deep.
+
+### Root cause
+Hermes never asserted caller identity to MCP tools. The file_* tools'
+schemas declare an `acting_user` parameter; the LLM was choosing to fill
+it with `"mridul"` because prior chat-side instructions/memories
+("today only mridul can use the file related mcp tools") primed it to
+default to the operator. The gateway's `build_session_context_prompt`
+did correctly show `**User:** Deep` for Deep's inbounds — the model just
+ignored that for the MCP arg.
+
+`tools/mcp_tool.py` previously did `session.call_tool(tool_name,
+arguments=args)` with zero per-call identity injection. The MCP HTTP
+session is single, with a static `Authorization` header, so per-call
+identity has to ride in the args.
+
+### Fix shape
+Deterministic override at the MCP call boundary:
+
+- `tools/mcp_tool.py:_register_server_tools` — inspects each tool's
+  normalized schema; if `properties.acting_user` exists, sets
+  `has_acting_user=True` when building the handler.
+- `tools/mcp_tool.py:_make_tool_handler` — when `has_acting_user` is true
+  AND `HERMES_SESSION_USER_ID` is non-empty, the handler unconditionally
+  sets `args["acting_user"] = session_user_id` before dispatching. Logs
+  at INFO when an override changes the model-supplied value (audit
+  trail). The LLM cannot impersonate any user.
+- CLI/cron with no inbound sender (session vars unset): handler does
+  nothing — LLM's value stands. Single-trusted-user contexts are fine.
+- Value used: `HERMES_SESSION_USER_ID` (the JID/LID like
+  `180866038948085@lid`), per user's note. MCP server side may need to
+  map LIDs → logical users; that's deep MCP's responsibility.
+
+### Tests
+`tests/tools/test_mcp_tool.py::TestActingUserOverride` — 5 cases:
+1. Overrides LLM-supplied value
+2. Injects when LLM omits
+3. No-op when session user unset (CLI/cron)
+4. No-op when schema doesn't declare `acting_user`
+5. End-to-end via `_register_server_tools` + `registry.dispatch`
+
+187/187 in `test_mcp_tool.py` pass. Broader `tests/tools/` regression
+showed 24 pre-existing failures (confirmed via `git stash`); none
+introduced by this change.
+
+### Deploy
+Standard source-only flow: commit + push + Coolify rebuild
+`eureka-hermes`. No config / env changes required. Per-user logical
+mapping (LID → "mridul"/"deep"/etc.) lives on the deep MCP side.
+
+### Verified in production (2026-05-18 23:35)
+Trajectory `20260518_215322_b58e4f1a.jsonl` in test_profile shows
+post-fix behavior: Deep asked "don't return from existing file, make
+mcp call" → LLM called `file_get` with `acting_user=
+"104084237459666@lid"` (Mridul's LID, what it always did) → MCP
+returned `"forbidden: file not visible or does not exist"`. The
+identical call SUCCEEDED in the pre-fix trajectory two hours earlier
+— only the override changes between the two runs, so MCP is receiving
+the gateway-asserted Deep LID and correctly refusing. The agent's
+own reply: *"I did make the MCP call just now — and MCP refused it."*
+
+User also confirmed Deep gets the right refusal in both DM and group
+contexts. The earlier 23:28 cached-`MEDIA:`-path leak no longer
+reproduces in fresh testing; the override's downstream effect appears
+to cover the cached-path-replay case too (agent refuses to re-serve
+when MCP can't reconfirm visibility for the current sender).
+
+### Follow-ups (optional, not blocking)
+- Commit `72f7fc8ab` adds an unconditional INFO log on every
+  acting_user-aware MCP call (audit trail). Useful while the
+  feature is new; consider reverting later to reduce log volume.
+- If a tainted session ever does replay a path via `MEDIA:` without
+  a re-validation through MCP, a defense-in-depth fix is to sandbox
+  `/data/shared/agent-uploads/<file_id>/` per worker, or to
+  re-validate any `MEDIA:` path through MCP at the WhatsApp egress
+  boundary using the current session user's identity.
+
+---
+
+## Pickup Task (2026-05-17): Hue Remote API integration — code ready, awaiting redeploy + bootstrap
+
+### Goal
+Let Hermes control Philips Hue lights from the Oracle VM (`eureka-hermes` container), which is **not on the home LAN**. The bundled `openhue` skill requires LAN access and can't be used from the VM. After today's debugging, settled on the Hue Remote API (cloud) path.
+
+### Paths considered and rejected
+1. **openhue-on-Mac, SSH-via-Tailscale.** User killed (correctly): SSH key on VM = full Mac shell access; over-broad.
+2. **openhue-on-Mac, HTTP wrapper bound to Tailscale IP, token-auth.** Killed mid-execution by macOS Sequoia Local Network permission: every `connect()` from a Claude-Code-spawned process to the bridge's `10.0.0.32` returns immediate "No route to host" (RTF_REJECT route). Permission flips are non-durable. See memory `project_macos_local_network_blocks_lan.md`.
+3. **Home Assistant + MCP on always-on home device.** Deferred; user didn't have hardware ready.
+
+### What was built this session
+Code committed-ready (uncommitted as of HANDOFF.md write; ask user before `git commit`):
+- `scripts/hue-cloud/cli.py` — Python stdlib-only CLI. Mirrors openhue's argv: `get light/room/scene`, `set light/room <name> [--on|--off|--brightness|--temperature|--color|--rgb]`, `set scene <name> --room <room>`. Auto-refreshes access token on 401 (Hue rotates refresh tokens — file write is atomic via tmp+rename, 0600 perms).
+- `scripts/hue-cloud/bootstrap.py` — One-time interactive OAuth setup. Reads credentials, prints authorize URL, captures code from pasted redirect URL (no listener needed; user copies from browser address bar), exchanges for tokens, presses remote linkbutton, creates whitelist Hue user, writes `tokens.json`.
+- `skills/smart-home/hue-cloud/SKILL.md` — New skill (`prerequisites.commands: [hue-cloud]`).
+- `skills/smart-home/openhue/SKILL.md` — Added one-paragraph warning: LAN-only; off-LAN setups should use `hue-cloud`.
+- `Dockerfile` — Added two COPY lines after the venv install (cache-friendly placement) that bake both scripts into `/usr/local/bin/` inside the image.
+
+Confirmed against the actual (logged-in) Hue OAuth spec — endpoints, Basic auth pattern, refresh-token rotation, whitelist-user creation flow all match the doc at `developers.meethue.com/develop/hue-api/remote-api-quick-start-guide/`.
+
+### Runtime data on VM (already in place)
+- `/data/hermes-agent/hue-cloud/.env` (mode 600, uid 10000) holds `HUE_APP_ID`, `HUE_CLIENT_ID`, `HUE_CLIENT_SECRET`. Created interactively by user during this session.
+- `/data/hermes-agent/hue-cloud/tokens.json` does not exist yet — `hue-cloud-bootstrap` creates it.
+
+### Stale artifacts from rejected paths (safe to ignore; cleanup optional)
+- `/data/hermes-agent/.ssh/openhue_ed25519{,.pub}` — unused keypair from rejected SSH plan.
+- `/data/hermes-agent/.local/bin/` — empty dir, never populated.
+- On user's Mac: `openhue-cli` Homebrew install, never paired (macOS Local Network block); `brew uninstall openhue/cli/openhue-cli` if cleaning up.
+
+### Next steps to ship
+1. **User commits + pushes** the five changes above (no secrets touched; `.env` lives only on VM volume).
+2. **User triggers Coolify redeploy** of `eureka-hermes` to rebuild the image with the new scripts.
+3. **User runs `docker exec -it eureka-hermes hue-cloud-bootstrap`** interactively. Walks through the OAuth dance once. Tokens land in `/opt/data/hue-cloud/tokens.json` (= `/data/hermes-agent/hue-cloud/tokens.json` on host).
+4. **Smoke test:** `docker exec eureka-hermes hue-cloud get light` — should print the user's lights table.
+5. Agent should auto-pick up the new `hue-cloud` skill on next refresh (the bundled skills index re-discovers `skills/**/SKILL.md`).
+
+### Open questions
+- Whether `https://hermes.eureka-universe.com/oauth/hue/callback` (the registered callback URL) might collide with any future Hermes route. It currently 404s; the bootstrap relies on the user copying the URL bar regardless, so a future 200 there wouldn't break anything — just the user might be confused. Reserve the path if you grow into that domain.
+- v2 CLIP API (`/route/clip/v2/`) wasn't used — v1 (`/route/api/<user>/`) was sufficient and maps directly to openhue's command surface. Migrate to v2 only if v1 is deprecated or if you want sensor/MotionAware data.
+- Skill-index regeneration: `scripts/build_skills_index.py` may need to be re-run after merge so the new skill shows up in the bundled index. Verify on next start.
+
+---
+
+## Pickup Task (2026-05-11): Make MCP tools work inside profile workers
+
+### Background
+
+Project-logger ships an in-process MCP server at `http://app:8770/mcp`
+exposing 25+4 tools to hermes (see project-logger commit `71adc2e`). The
+gateway (in-process **primary profile**, currently named `default`)
+successfully discovers all 33 tools at startup — verified by:
+
+```
+/data/hermes-agent/logs/agent.log
+2026-05-11 02:42:48 INFO tools.mcp_tool: MCP server 'eureka-mcp' (HTTP):
+  registered 33 tool(s): mcp_eureka_mcp_log_recent, ...,
+  mcp_eureka_mcp_elevenlabs_list_voices, mcp_eureka_mcp_elevenlabs_tts,
+  mcp_eureka_mcp_elevenlabs_voice_to_voice,
+  mcp_eureka_mcp_elevenlabs_clone_voice, ...
+```
+
+**Problem:** profile-worker subprocesses (`test_profile`, `megha-bot`,
+`ember-bot`, `mast-family-bot`, `chatur-char-bot`) have **zero** MCP
+tools, even when their per-profile `config.yaml` declares `mcp_servers`
+with the right URL+auth.
+
+### Root cause (verified)
+
+`discover_mcp_tools()` (the function that reads `mcp_servers` from
+config and registers tools) is **only** called from
+`gateway/run.py:14108-14110`, inside `start_gateway()`. Profile workers
+bypass that wrapper:
+
+```
+hermes_cli/main.py             (top-level CLI; calls discover_mcp_tools)
+hermes_cli/profile_worker_cli.py
+  └─ main(): sets os.environ["HERMES_HOME"] = <profile path>   ✓
+  └─ asyncio.run(_run_worker(name))
+       └─ load_gateway_config()
+       └─ runner = GatewayRunner(cfg)
+       └─ runner.start()                                        # MCP discovery NOT here
+```
+
+So the `mcp_servers` block in
+`/data/hermes-agent/profiles/<name>/config.yaml` is read by nothing —
+the worker boots an `IPCPlatformAdapter`-only `GatewayRunner` and never
+touches MCP. (User already verified the HERMES_HOME override works:
+test_profile worker's runtime `HERMES_HOME` is correctly set to
+`/opt/data/profiles/test_profile`.)
+
+### What to do
+
+Patch `hermes_cli/profile_worker_cli.py:_run_worker()` to invoke
+`discover_mcp_tools()` after the worker has loaded gateway config but
+before it starts the runner. Mirror the pattern in
+`gateway/run.py:14101-14112`:
+
+```python
+# After load_gateway_config(), before runner.start():
+try:
+    from tools.mcp_tool import discover_mcp_tools
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, discover_mcp_tools)
+except Exception:
+    logger.exception(
+        "profile-worker[%s]: MCP tool discovery failed", profile_name,
+    )
+```
+
+Important constraints:
+
+1. **Must run in an executor** (not direct `await`). Same reason as
+   `gateway/run.py:14101` — `discover_mcp_tools` blocks up to 120s
+   while waiting for slow MCP servers; running it on the loop thread
+   freezes IPC heartbeats.
+
+2. **Must run AFTER HERMES_HOME override.** It already does — the
+   override happens in `main()` before `_run_worker()` is called. So
+   `_load_mcp_config()` will read the profile's own `config.yaml`.
+
+3. **Add `shutdown_mcp_servers()` to worker shutdown path** for
+   symmetry. Look at `tools/mcp_tool.py` for the right hook.
+
+### Per-profile MCP config requirement
+
+Profile config schema (in `/data/hermes-agent/profiles/<name>/config.yaml`)
+needs to declare `mcp_servers` itself — the global config is no longer
+consulted once HERMES_HOME is overridden. Example (test_profile already
+has this):
+
+```yaml
+mcp_servers:
+  eureka-mcp:
+    url: http://app:8770/mcp
+    enabled: true
+    headers:
+      Authorization: Basic <base64-user:pass>
+    tools:
+      include:
+        - elevenlabs_list_voices
+        - elevenlabs_tts
+        - elevenlabs_voice_to_voice
+        - elevenlabs_clone_voice
+      prompts: false
+      resources: false
+```
+
+Document this in the patch's commit message / docs so operators know
+each profile owns its own MCP config now.
+
+### Cost / trade-off note
+
+Each profile worker will hold an independent MCP session to
+`app:8770`. With 5 profile workers + 1 primary = 6 concurrent sessions
+to project-logger's MCP server. Project-logger's MCP can handle that
+(it's FastMCP with streamable HTTP), but worth noting for capacity
+planning. If this becomes a problem, an alternative architecture is a
+shared MCP-proxy process per container that all workers IPC-route
+through — out of scope for the first patch.
+
+### Verification plan
+
+1. Apply patch, rebuild image, redeploy `eureka-hermes` via Coolify.
+2. On VM, tail the per-profile log:
+   `sudo tail -f /data/hermes-agent/profiles/test_profile/logs/agent.log`
+   Expect at startup: `"MCP server 'eureka-mcp' (HTTP): registered N tool(s)"`.
+3. Send a WhatsApp message from `+14085921090` (maps to `test_profile`):
+   "list elevenlabs voices via mcp". Expect a real voice list, not
+   "no MCP tools available".
+4. Verify session count on project-logger app side:
+   `docker logs $(docker ps -f name=^app- --format "{{.Names}}") 2>&1 | grep "Created new transport" | tail -10`
+   should show ~6 sessions (one per profile + the primary), not just 1.
+
+### Useful references
+
+- Spawn config: `gateway/run.py:1201-1234` (`_spawn_profile_workers`).
+- Profile worker entry: `hermes_cli/profile_worker_cli.py` (whole file).
+- MCP discovery: `tools/mcp_tool.py:2891-` (`discover_mcp_tools`).
+- Profile→sender routing: `/data/hermes-agent/config.yaml`
+  `channels.whatsapp.profile_routing.sender_profile_map`.
+- Today's analysis transcript: see project-logger conversation
+  `2026-05-11` re: ElevenLabs MCP tools rollout.
+
+### Open questions for next session
+
+1. Should `discover_mcp_tools` in the worker honour a worker-level
+   timeout shorter than the default 120s? Slow MCP servers will delay
+   worker readiness — `gateway/profile_worker_manager.py` has its own
+   readiness deadline; need to check the budget.
+
+2. Reload behaviour: `cli.py:7752-7900` has a config-watcher that
+   reloads MCP on `mcp_servers` change in the **main** config. Should
+   profile workers grow the same watcher, or is "restart the worker"
+   acceptable for the v1 patch?
+
+3. Tool-name collisions: every worker registers tools as
+   `mcp_eureka_mcp_<tool>`. The global registry is per-process so
+   workers don't actually collide with each other, but worth confirming
+   no shared state in `tools/mcp_tool.py` module-level dicts gets
+   shared across workers via fork/copy-on-write (workers are
+   subprocess, not fork — so likely fine, but verify).
+
+---
+
+## Completed this session (2026-05-11): Profile-worker filesystem sandbox
+
+Shipped Layer 1 + Layer 2 code in a single pass. Layer 2 is no-op until
+the container is reconfigured (see "Activation" below).
+
+**Files changed:**
+- `tools/_sandbox.py` *(new)* — `enabled()`, `check_path()`,
+  `check_paths()`, `bwrap_supported()`, `maybe_wrap_command()`. Single
+  source of truth for allowlist + bwrap argv.
+- `tools/file_tools.py` — guards at top of `read_file_tool`,
+  `write_file_tool`, `patch_tool` (covers V4A multi-file too via
+  `_paths_to_check`), and `search_tool`.
+- `tools/terminal_tool.py` — `maybe_wrap_command(cmd, env_type)` after
+  the dangerous-command guards, before bg/fg branch. Also guards
+  `workdir` against the allowlist.
+- `hermes_cli/profile_worker_cli.py` — `_apply_sandbox_env()` reads
+  `sandbox: strict` from the profile's `config.yaml` and exports
+  `HERMES_SANDBOX=strict` before any tool import.
+- `Dockerfile` — added `bubblewrap` to the apt install list.
+- `docs/profile_worker_sandboxing.md` — status header + operator
+  activation checklist.
+- `tests/tools/test_sandbox.py` *(new)* — 19 tests covering enabled
+  predicate, path acceptance/rejection (incl. symlink + `..` escapes),
+  Layer 2 no-op decisions, and e2e through `read/write/search_files`.
+
+**Verification (local):**
+- `scripts/run_tests.sh tests/tools/test_sandbox.py` — 19/19 pass.
+- `scripts/run_tests.sh tests/tools/test_file_tools.py tests/tools/test_terminal_tool.py` — 37/37 pass (no regression with sandbox off).
+- `scripts/run_tests.sh tests/hermes_cli/test_profile_worker_cli.py tests/gateway/test_profile_worker*.py` — 12/12 pass.
+
+**Container blocker (Layer 2 only):** Verified from the VM that
+`eureka-hermes` runs with `CapAdd=[]`, `SecurityOpt=[]`,
+`Privileged=false`. `bwrap --unshare-user ...` fails inside the
+container ("No permissions to create new namespace") because Docker's
+default seccomp profile blocks the user-namespace clone syscall. The
+`bwrap_supported()` probe detects this at worker startup and falls back
+to no-op wrapping — Layer 1 still applies; nothing breaks.
+
+**Activation when ready (operator):**
+1. Add `sandbox: strict` to a non-primary profile's
+   `/data/hermes-agent/profiles/<name>/config.yaml`. Restart that
+   worker (gateway respawns on next message). Layer 1 is live; check
+   the worker's `agent.log` for the `"filesystem sandbox active"`
+   line.
+2. To activate Layer 2: in Coolify, add
+   `security_opt: ["seccomp=unconfined"]` (or `cap_add: ["SYS_ADMIN"]`)
+   to the `eureka-hermes` service; redeploy; verify with
+   `docker exec eureka-hermes bwrap --unshare-user --ro-bind /usr /usr /bin/true`.
+   The next worker spawn picks it up automatically.
+
+## Deferred features (not yet scheduled)
+
+- **Coolify config change** for `seccomp=unconfined` on eureka-hermes.
+  Code is ready; only the ops flip is outstanding. See activation steps
+  above.

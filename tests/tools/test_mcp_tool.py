@@ -570,6 +570,183 @@ class TestToolHandler:
             _servers.pop("test_srv", None)
 
 
+class TestActingUserOverride:
+    """The handler asserts identity from the gateway session — never trusting
+    the model — when the tool's schema declares an ``acting_user`` parameter.
+
+    Reproduces the confused-deputy bug where a non-owner WhatsApp sender
+    would reach private files because the LLM populated ``acting_user``
+    with the operator's identity.
+    """
+
+    def _patch_mcp_loop(self):
+        def fake_run(coro, timeout=30):
+            return asyncio.run(coro)
+        return patch("tools.mcp_tool._run_on_mcp_loop", side_effect=fake_run)
+
+    def _setup_handler(self, *, has_acting_user):
+        from tools.mcp_tool import _make_tool_handler, _servers
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(
+            return_value=_make_call_result("ok", is_error=False)
+        )
+        server = _make_mock_server("eureka", session=mock_session)
+        _servers["eureka"] = server
+        handler = _make_tool_handler(
+            "eureka", "file_search", 120, has_acting_user=has_acting_user,
+        )
+        return handler, mock_session
+
+    def test_overrides_llm_supplied_value(self):
+        from gateway.session_context import set_session_vars, clear_session_vars
+        from tools.mcp_tool import _servers
+
+        handler, session = self._setup_handler(has_acting_user=True)
+        tokens = set_session_vars(
+            platform="whatsapp",
+            user_id="180866038948085@lid",
+            user_name="Deep",
+        )
+        try:
+            with self._patch_mcp_loop():
+                handler({"query": "i797", "acting_user": "mridul"})
+            session.call_tool.assert_called_once()
+            _, kwargs = session.call_tool.call_args
+            assert kwargs["arguments"]["acting_user"] == "180866038948085@lid"
+            assert kwargs["arguments"]["query"] == "i797"
+        finally:
+            clear_session_vars(tokens)
+            _servers.pop("eureka", None)
+
+    def test_injects_when_llm_omits(self):
+        from gateway.session_context import set_session_vars, clear_session_vars
+        from tools.mcp_tool import _servers
+
+        handler, session = self._setup_handler(has_acting_user=True)
+        tokens = set_session_vars(
+            platform="whatsapp",
+            user_id="180866038948085@lid",
+            user_name="Deep",
+        )
+        try:
+            with self._patch_mcp_loop():
+                handler({"query": "i797"})
+            _, kwargs = session.call_tool.call_args
+            assert kwargs["arguments"]["acting_user"] == "180866038948085@lid"
+        finally:
+            clear_session_vars(tokens)
+            _servers.pop("eureka", None)
+
+    def test_no_override_when_session_user_unset(self):
+        """CLI/cron contexts have no inbound sender — the model's value passes
+        through. Tests rely on the isolation fixture clearing session vars."""
+        from gateway.session_context import set_session_vars, clear_session_vars
+        from tools.mcp_tool import _servers
+
+        handler, session = self._setup_handler(has_acting_user=True)
+        # Explicitly set user_id to "" to simulate CLI/cron.
+        tokens = set_session_vars(platform="cli", user_id="", user_name="")
+        try:
+            with self._patch_mcp_loop():
+                handler({"query": "i797", "acting_user": "mridul"})
+            _, kwargs = session.call_tool.call_args
+            assert kwargs["arguments"]["acting_user"] == "mridul"
+        finally:
+            clear_session_vars(tokens)
+            _servers.pop("eureka", None)
+
+    def test_no_change_when_schema_lacks_acting_user(self):
+        from gateway.session_context import set_session_vars, clear_session_vars
+        from tools.mcp_tool import _servers
+
+        handler, session = self._setup_handler(has_acting_user=False)
+        tokens = set_session_vars(
+            platform="whatsapp",
+            user_id="180866038948085@lid",
+            user_name="Deep",
+        )
+        try:
+            with self._patch_mcp_loop():
+                handler({"query": "i797", "acting_user": "mridul"})
+            _, kwargs = session.call_tool.call_args
+            # Tool doesn't declare acting_user — handler must not touch it.
+            assert kwargs["arguments"]["acting_user"] == "mridul"
+        finally:
+            clear_session_vars(tokens)
+            _servers.pop("eureka", None)
+
+    def test_registration_detects_acting_user_in_schema(self):
+        """``_register_server_tools`` must set has_acting_user from the
+        normalized schema so the override fires for file_* tools without
+        any per-tool hardcoding."""
+        from tools.mcp_tool import _register_server_tools, _servers
+        from tools.registry import registry
+
+        # Build a server whose discovered tools include one with acting_user
+        # in its inputSchema and one without.
+        tool_with = MagicMock()
+        tool_with.name = "file_search"
+        tool_with.description = "search files"
+        tool_with.inputSchema = {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "acting_user": {"type": "string"},
+            },
+        }
+        tool_without = MagicMock()
+        tool_without.name = "log_recent"
+        tool_without.description = "recent logs"
+        tool_without.inputSchema = {
+            "type": "object",
+            "properties": {"limit": {"type": "integer"}},
+        }
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(
+            return_value=_make_call_result("ok", is_error=False)
+        )
+        server = _make_mock_server("eureka", session=mock_session,
+                                   tools=[tool_with, tool_without])
+        _servers["eureka"] = server
+
+        # Snapshot existing registry entries we'd clobber, restore in finally.
+        prefixed_with = "mcp_eureka_file_search"
+        prefixed_without = "mcp_eureka_log_recent"
+
+        from gateway.session_context import set_session_vars, clear_session_vars
+        tokens = set_session_vars(
+            platform="whatsapp", user_id="180866038948085@lid", user_name="Deep",
+        )
+        try:
+            _register_server_tools("eureka", server, {})
+            with self._patch_mcp_loop():
+                registry.dispatch(
+                    prefixed_with,
+                    {"query": "i797", "acting_user": "mridul"},
+                )
+                registry.dispatch(
+                    prefixed_without,
+                    {"limit": 5, "acting_user": "mridul"},
+                )
+
+            assert mock_session.call_tool.call_count == 2
+            (name_a, kwargs_a), (name_b, kwargs_b) = (
+                mock_session.call_tool.call_args_list[0],
+                mock_session.call_tool.call_args_list[1],
+            )
+            # file_search: overridden to session identity
+            assert kwargs_a["arguments"]["acting_user"] == "180866038948085@lid"
+            # log_recent: untouched (no acting_user in schema)
+            assert kwargs_b["arguments"]["acting_user"] == "mridul"
+        finally:
+            clear_session_vars(tokens)
+            _servers.pop("eureka", None)
+            registry._tools.pop(prefixed_with, None)
+            registry._tools.pop(prefixed_without, None)
+
+
 class TestRunOnMCPLoopInterrupts:
     def test_interrupt_cancels_waiting_mcp_call(self):
         import tools.mcp_tool as mcp_mod

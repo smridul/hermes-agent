@@ -1,6 +1,6 @@
 ---
 name: openhue
-description: "Control Philips Hue lights, scenes, rooms via OpenHue CLI."
+description: "Control Philips Hue lights via the OpenHue CLI — LAN-ONLY: requires direct local-network access to the Hue Bridge. For off-LAN / cloud-VM Hermes deployments, use the `hue-cloud` skill instead."
 version: 1.0.0
 author: community
 license: MIT
@@ -16,6 +16,8 @@ prerequisites:
 # OpenHue CLI
 
 Control Philips Hue lights and scenes via a Hue Bridge from the terminal.
+
+**Use this skill only when Hermes runs on the same LAN as the Hue Bridge.** If Hermes runs off-LAN (e.g. on a cloud VM with no path to the bridge's local IP), use the `hue-cloud` skill instead — it talks to the Philips Hue Remote API and works from anywhere.
 
 ## Prerequisites
 

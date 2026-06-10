@@ -234,6 +234,36 @@ class TestConnectCleanup:
         mock_release.assert_called_once_with("whatsapp-session", str(adapter._session_path))
         assert adapter._platform_lock_identity is None
 
+    @pytest.mark.asyncio
+    async def test_uses_npm_ci_with_longer_default_timeout_when_lockfile_exists(self):
+        adapter = _make_adapter()
+
+        def _path_exists(path_obj):
+            path_str = str(path_obj)
+            if path_str.endswith("node_modules"):
+                return False
+            if path_str.endswith("package-lock.json"):
+                return True
+            return True
+
+        install_result = MagicMock(returncode=1, stderr="install failed")
+
+        with patch("gateway.platforms.whatsapp.check_whatsapp_requirements", return_value=True), \
+             patch.object(Path, "exists", autospec=True, side_effect=_path_exists), \
+             patch("subprocess.run", return_value=install_result) as mock_run, \
+             patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
+             patch("gateway.status.release_scoped_lock"):
+            result = await adapter.connect()
+
+        assert result is False
+        mock_run.assert_called_once_with(
+            ["npm", "ci", "--silent", "--no-audit", "--no-fund"],
+            cwd=str(Path(adapter._bridge_script).parent),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+
 
 class TestBridgeRuntimeFailure:
     """Verify runtime bridge death is surfaced as a fatal adapter error."""

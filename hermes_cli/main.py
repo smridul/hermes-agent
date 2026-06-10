@@ -2179,6 +2179,17 @@ def cmd_proxy(args):
     rc = _cmd_proxy(args)
     if isinstance(rc, int) and rc != 0:
         raise SystemExit(rc)
+def cmd_profile_worker(args):
+    """Run a Hermes worker subprocess for a single profile.
+
+    Used internally by the gateway's WhatsApp sender-profile-routing
+    feature: ingress spawns one of these per non-primary profile and
+    forwards routed events over stdin/stdout JSON IPC.  Not intended for
+    direct end-user invocation.
+    """
+    from hermes_cli.profile_worker_cli import main as profile_worker_main
+
+    sys.exit(profile_worker_main(["--name", args.name]))
 
 
 def cmd_whatsapp(args):
@@ -13270,6 +13281,21 @@ def main():
         # LSP is optional infrastructure — never let a registration
         # failure break the CLI overall.
         logger.debug("LSP CLI registration failed: %s", _lsp_err)
+    # profile-worker command (internal)
+    # =========================================================================
+    profile_worker_parser = subparsers.add_parser(
+        "profile-worker",
+        help=argparse.SUPPRESS,  # internal — not surfaced in --help
+        description=(
+            "Run a Hermes worker subprocess for a single profile (used by "
+            "the gateway's WhatsApp sender-profile-routing feature). Not "
+            "intended for direct invocation."
+        ),
+    )
+    profile_worker_parser.add_argument(
+        "--name", required=True, help="Profile name to load"
+    )
+    profile_worker_parser.set_defaults(func=cmd_profile_worker)
 
     # =========================================================================
     # setup command

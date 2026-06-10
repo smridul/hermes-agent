@@ -2230,6 +2230,7 @@ _SESSION_EXPIRED_MARKERS: tuple = (
     "expired session",
     "session expired",
     "session not found",
+    "session terminated",
     "unknown session",
     "session terminated",
     "closedresourceerror",
@@ -2257,6 +2258,20 @@ def _is_session_expired_error(exc: BaseException) -> bool:
     """
     if isinstance(exc, InterruptedError):
         return False
+    # When the MCP server-side disappears mid-session (e.g. container
+    # replacement during a Coolify deploy), the SDK's underlying anyio
+    # memory streams get torn down before ``MCPServerTask`` clears
+    # ``self.session``. The next ``call_tool`` then hits a closed/
+    # broken stream and ``send_request`` raises one of these from
+    # ``mcp/shared/session.py``'s ``await self._write_stream.send(...)``.
+    # These exceptions carry an empty message, so the substring match
+    # below would miss them. Detect by type so the recovery hook fires.
+    try:
+        import anyio
+        if isinstance(exc, (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream)):
+            return True
+    except ImportError:
+        pass
     # Exception messages vary across SDK versions + server
     # implementations, so match on a small allow-list of stable
     # substrings rather than exception type.  Kept narrow to avoid
@@ -2496,12 +2511,28 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                future.cancel()
-                elapsed = time.monotonic() - start_time
-                raise TimeoutError(
-                    f"MCP call timed out after {elapsed:.1f}s "
-                    f"(configured timeout: {float(timeout):.1f}s)"
-                )
+                # Cancel the coroutine so it doesn't keep running on the
+                # MCP loop after we surface the timeout.  Without this,
+                # a `_call()` that hung past `tool_timeout` stays alive
+                # forever holding `server._rpc_lock`, wedging every
+                # subsequent tool call and the reconnect's
+                # `_discover_tools` until the gateway is restarted.
+                # Observed 2026-05-15 against eureka-mcp during a
+                # Coolify container swap.
+                if not future.done():
+                    future.cancel()
+                try:
+                    return future.result(timeout=0)
+                except concurrent.futures.CancelledError:
+                    # The cancel we just requested already landed.  Surface
+                    # this as a timeout: it's the contract the rest of the
+                    # module expects on deadline expiry, and
+                    # `concurrent.futures.CancelledError` is BaseException
+                    # in 3.8+ so `except Exception` clauses upstream would
+                    # let it escape uncaught.
+                    raise concurrent.futures.TimeoutError(
+                        f"MCP call exceeded {timeout:.1f}s deadline"
+                    ) from None
             wait_timeout = min(wait_timeout, remaining)
 
         try:
@@ -2587,11 +2618,28 @@ async def _connect_server(name: str, config: dict) -> MCPServerTask:
 # Handler / check-fn factories
 # ---------------------------------------------------------------------------
 
-def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
+def _make_tool_handler(
+    server_name: str,
+    tool_name: str,
+    tool_timeout: float,
+    *,
+    has_acting_user: bool = False,
+):
     """Return a sync handler that calls an MCP tool via the background loop.
 
     The handler conforms to the registry's dispatch interface:
     ``handler(args_dict, **kwargs) -> str``
+
+    When *has_acting_user* is true, the handler deterministically overrides
+    ``args["acting_user"]`` with the current gateway session's user
+    identifier (``HERMES_SESSION_USER_ID``) before dispatching the call.
+    This closes a confused-deputy bug where the LLM, prompted by stale
+    instructions or memories, would supply the operator's identity for
+    inbound messages from a different sender — letting that sender read
+    files the owner had marked private. The gateway is the only component
+    that knows who the inbound sender actually is, so identity is asserted
+    here and never trusted from the model. If no session user is set
+    (CLI / cron / tests), the LLM's value is left intact.
     """
 
     def _handler(args: dict, **kwargs) -> str:
@@ -2628,6 +2676,31 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             return json.dumps({
                 "error": f"MCP server '{server_name}' is not connected"
             }, ensure_ascii=False)
+
+        # Identity override: the gateway is the only component that knows
+        # who sent the inbound message. Asserting acting_user from session
+        # context (and refusing to trust the model's value) prevents a
+        # confused-deputy where a non-owner sender reaches private data
+        # by hitting a tool that the model populated with the operator's
+        # name. Lazy-imported to avoid a tools→gateway cycle at import time.
+        if has_acting_user:
+            from gateway.session_context import get_session_env
+            session_user = get_session_env("HERMES_SESSION_USER_ID", "")
+            session_name = get_session_env("HERMES_SESSION_USER_NAME", "")
+            supplied = args.get("acting_user")
+            logger.info(
+                "MCP identity-check %s/%s: session_user_id=%r "
+                "session_user_name=%r model_supplied=%r",
+                server_name, tool_name, session_user, session_name, supplied,
+            )
+            if session_user:
+                if supplied != session_user:
+                    logger.info(
+                        "MCP tool %s/%s: overriding acting_user %r → %r "
+                        "(session identity asserted by gateway)",
+                        server_name, tool_name, supplied, session_user,
+                    )
+                args = {**args, "acting_user": session_user}
 
         async def _call():
             async with server._rpc_lock:
@@ -2719,8 +2792,8 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
 
             _bump_server_error(server_name)
             logger.error(
-                "MCP tool %s/%s call failed: %s",
-                server_name, tool_name, exc,
+                "MCP tool %s/%s call failed: %s: %s",
+                server_name, tool_name, type(exc).__name__, exc,
             )
             return json.dumps({
                 "error": _sanitize_error(
@@ -2778,7 +2851,8 @@ def _make_list_resources_handler(server_name: str, tool_timeout: float):
             if recovered is not None:
                 return recovered
             logger.error(
-                "MCP %s/list_resources failed: %s", server_name, exc,
+                "MCP %s/list_resources failed: %s: %s",
+                server_name, type(exc).__name__, exc,
             )
             return json.dumps({
                 "error": _sanitize_error(
@@ -2838,7 +2912,8 @@ def _make_read_resource_handler(server_name: str, tool_timeout: float):
             if recovered is not None:
                 return recovered
             logger.error(
-                "MCP %s/read_resource failed: %s", server_name, exc,
+                "MCP %s/read_resource failed: %s: %s",
+                server_name, type(exc).__name__, exc,
             )
             return json.dumps({
                 "error": _sanitize_error(
@@ -2901,7 +2976,8 @@ def _make_list_prompts_handler(server_name: str, tool_timeout: float):
             if recovered is not None:
                 return recovered
             logger.error(
-                "MCP %s/list_prompts failed: %s", server_name, exc,
+                "MCP %s/list_prompts failed: %s: %s",
+                server_name, type(exc).__name__, exc,
             )
             return json.dumps({
                 "error": _sanitize_error(
@@ -2972,7 +3048,8 @@ def _make_get_prompt_handler(server_name: str, tool_timeout: float):
             if recovered is not None:
                 return recovered
             logger.error(
-                "MCP %s/get_prompt failed: %s", server_name, exc,
+                "MCP %s/get_prompt failed: %s: %s",
+                server_name, type(exc).__name__, exc,
             )
             return json.dumps({
                 "error": _sanitize_error(
@@ -3402,11 +3479,23 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
             )
             continue
 
+        # Detect identity contract: if the tool's schema declares an
+        # `acting_user` parameter, the handler will deterministically
+        # populate it from the gateway session at dispatch time rather
+        # than trusting whatever the model produced.
+        _props = (schema.get("parameters") or {}).get("properties") or {}
+        _has_acting_user = isinstance(_props, dict) and "acting_user" in _props
+
         registry.register(
             name=tool_name_prefixed,
             toolset=toolset_name,
             schema=schema,
-            handler=_make_tool_handler(name, mcp_tool.name, server.tool_timeout),
+            handler=_make_tool_handler(
+                name,
+                mcp_tool.name,
+                server.tool_timeout,
+                has_acting_user=_has_acting_user,
+            ),
             check_fn=_make_check_fn(name),
             is_async=False,
             description=schema["description"],
