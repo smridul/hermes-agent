@@ -363,7 +363,8 @@ PROMPT='%F{green}%n@uhermes%f:%F{blue}%~%f%# '
 alias ls='ls --color=auto'
 alias ll='ls -lah'
 alias grep='grep --color=auto'
-export LESS='-R'ZEOF
+export LESS='-R'
+ZEOF
 RUN chsh -s /usr/bin/zsh hermes
 
 ENTRYPOINT [ "/init", "/opt/hermes/docker/main-wrapper.sh" ]
