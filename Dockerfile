@@ -177,6 +177,19 @@ COPY --chown=hermes:hermes . .
 RUN cd web && npm run build && \
     cd ../ui-tui && npm run build
 
+# ---------- WhatsApp (Baileys) bridge deps — baked into the image ----------
+# Pre-install the bridge's node_modules at build time so a fresh container
+# never does a slow first-boot `npm` install. That cold install (~80s) used
+# to overrun the WhatsApp connect timeout, crash the gateway, and — under
+# s6-overlay — latch the profile to "stopped" with no self-restart (unlike
+# the pre-s6 entrypoint.sh, which exited so Docker restarted the container).
+# Baking the deps in removes the trigger entirely; the runtime install path
+# in whatsapp.py is skipped because node_modules already exists.
+RUN cd scripts/whatsapp-bridge && \
+    if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; \
+    else npm install --no-audit --no-fund; fi && \
+    npm cache clean --force
+
 # ---------- Permissions ----------
 # Make install dir world-readable so any HERMES_UID can read it at runtime.
 # The venv needs to be traversable too.
