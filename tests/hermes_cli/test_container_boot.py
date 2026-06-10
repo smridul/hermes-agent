@@ -663,3 +663,78 @@ def test_profiles_default_subdir_is_skipped_with_warning(
     assert any(
         "profiles/default/" in record.message for record in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# profile_routing workers must NOT also auto-start a standalone gateway
+# (regression: a pre-s6 fork volume flags every profile "running", so the
+# reconciler would double-run each routed profile — once as a worker
+# subprocess of the default gateway, once as its own s6 gateway).
+# ---------------------------------------------------------------------------
+
+
+def _write_root_config(hermes_home: Path, *, profiles: list[str],
+                       default_profile: str = "default") -> None:
+    """Write a minimal config.yaml with whatsapp.profile_routing."""
+    import yaml
+    cfg = {
+        "whatsapp": {
+            "profile_routing": {
+                "profiles": profiles,
+                "default_profile": default_profile,
+            }
+        }
+    }
+    (hermes_home / "config.yaml").write_text(yaml.safe_dump(cfg))
+
+
+def test_profile_routing_worker_is_registered_not_autostarted(tmp_path: Path) -> None:
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    # megha-bot is a routing worker; running state would normally autostart.
+    _write_root_config(tmp_path, profiles=["default", "megha-bot"])
+    _make_profile(tmp_path, "megha-bot", state="running")
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path, scandir=scandir, dry_run=False,
+    )
+
+    # Registered down despite state="running" — it's a worker.
+    assert _named_actions(actions) == [ReconcileAction(
+        profile="megha-bot", prior_state="running", action="registered",
+    )]
+    svc = scandir / "gateway-megha-bot"
+    assert (svc / "run").exists()        # slot still registered (start-on-demand)
+    assert (svc / "down").exists()       # but held down (not auto-started)
+
+
+def test_non_routing_profile_still_autostarts(tmp_path: Path) -> None:
+    """Control: a profile NOT in profile_routing keeps the normal
+    running->autostart behavior, so genuine standalone profile gateways
+    are unaffected by the worker-skip."""
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _write_root_config(tmp_path, profiles=["default", "megha-bot"])
+    _make_profile(tmp_path, "megha-bot", state="running")   # worker -> down
+    _make_profile(tmp_path, "standalone", state="running")  # not routed -> up
+
+    actions = {a.profile: a.action for a in reconcile_profile_gateways(
+        hermes_home=tmp_path, scandir=scandir, dry_run=False,
+    )}
+
+    assert actions["megha-bot"] == "registered"
+    assert actions["standalone"] == "started"
+    assert (scandir / "gateway-standalone").exists()
+    assert not (scandir / "gateway-standalone" / "down").exists()
+
+
+def test_no_profile_routing_config_preserves_autostart(tmp_path: Path) -> None:
+    """Fail-safe: no config.yaml / no profile_routing -> nothing is skipped
+    (prior behavior preserved)."""
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _make_profile(tmp_path, "coder", state="running")
+
+    actions = _named_actions(reconcile_profile_gateways(
+        hermes_home=tmp_path, scandir=scandir, dry_run=False,
+    ))
+    assert actions == [ReconcileAction(
+        profile="coder", prior_state="running", action="started",
+    )]

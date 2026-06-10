@@ -117,6 +117,13 @@ def reconcile_profile_gateways(
 
     profiles_root = hermes_home / "profiles"
     if profiles_root.is_dir():
+        # Profiles that are WhatsApp profile_routing *workers* run as
+        # subprocesses of the default gateway (ProfileWorkerManager). They
+        # must NOT also be auto-started as standalone s6 gateways — that
+        # duplicates the worker (wasted memory + double per-profile cron),
+        # which is exactly the divergence seen when a pre-s6 fork volume
+        # (every profile flagged "running") boots under the s6 reconciler.
+        worker_targets = _profile_routing_worker_targets(hermes_home)
         for entry in sorted(profiles_root.iterdir()):
             if not entry.is_dir():
                 continue
@@ -141,6 +148,16 @@ def reconcile_profile_gateways(
 
             prior_state = _read_prior_state(entry)
             should_start = prior_state in _AUTOSTART_STATES
+            if should_start and entry.name in worker_targets:
+                # Handled in-process by the default gateway — register the
+                # slot (so an explicit `hermes -p <name> gateway start` still
+                # works on demand) but never auto-start it here.
+                log.info(
+                    "reconcile: profile=%s is a profile_routing worker; "
+                    "registering down, not auto-starting a standalone gateway",
+                    entry.name,
+                )
+                should_start = False
 
             if not dry_run:
                 _cleanup_stale_runtime_files(entry)
@@ -155,6 +172,49 @@ def reconcile_profile_gateways(
     if not dry_run:
         _write_reconcile_log(hermes_home, actions)
     return actions
+
+
+def _profile_routing_worker_targets(hermes_home: Path) -> frozenset[str]:
+    """Return profiles that are WhatsApp ``profile_routing`` workers.
+
+    A routing worker is handled in-process by the default gateway's
+    ProfileWorkerManager (one subprocess per non-primary profile), so the
+    s6 reconciler must not also auto-start a standalone gateway for it.
+
+    Reads ``config.yaml`` directly (no gateway imports, no dir side-effects)
+    so this stays cheap and safe at container boot. Fail-safe: any error
+    returns an empty set, preserving the prior auto-start behavior.
+    """
+    try:
+        import yaml
+
+        cfg_path = hermes_home / "config.yaml"
+        if not cfg_path.is_file():
+            return frozenset()
+        with cfg_path.open() as fh:
+            cfg = yaml.safe_load(fh) or {}
+        wa = cfg.get("whatsapp") if isinstance(cfg, dict) else None
+        routing = wa.get("profile_routing") if isinstance(wa, dict) else None
+        if not isinstance(routing, dict):
+            return frozenset()
+
+        names: set[str] = set()
+        profiles = routing.get("profiles")
+        if isinstance(profiles, list):
+            names |= {p for p in profiles if isinstance(p, str) and p}
+        # Defensive: also pick up targets referenced only in the maps.
+        for map_key in ("sender_profile_map", "group_profile_map"):
+            mapping = routing.get(map_key)
+            if isinstance(mapping, dict):
+                names |= {v for v in mapping.values() if isinstance(v, str) and v}
+
+        primary = routing.get("default_profile")
+        if isinstance(primary, str) and primary:
+            names.discard(primary)
+        return frozenset(names)
+    except Exception as exc:  # noqa: BLE001 — never let detection break boot
+        log.debug("profile_routing worker-target detection failed: %s", exc)
+        return frozenset()
 
 
 def _maybe_migrate_legacy_gateway_run_state(
