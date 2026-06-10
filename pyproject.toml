@@ -246,10 +246,6 @@ all = [
   "hermes-agent[sms]",
   "hermes-agent[acp]",
   "hermes-agent[google]",
-  # [mistral] excluded: the `mistralai` package on PyPI is quarantined
-  # (zero installable versions), which fails `pip install -e .[all]`.
-  # Install the [mistral] extra explicitly once PyPI unblocks it.
-  "hermes-agent[bedrock]",
   "hermes-agent[web]",
   "hermes-agent[youtube]",
 ]
