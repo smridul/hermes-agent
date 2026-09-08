@@ -60,3 +60,18 @@ using. Serving it over a network needs real TLS *and* a patch to preserve `Secur
 
 The token registers a device named `alexa_cookie_cli` on the Amazon account. Deregistering it
 from the Amazon device list revokes access immediately.
+
+## Direct smart-home API (preferred over voice)
+
+Once the cookie exists, devices can be read and controlled directly — no Echo involved:
+
+- `GET /api/behaviors/entities?skillId=amzn1.ask.1p.smarthome` — device list with entity IDs
+- `POST /api/phoenix/state` with `{"stateRequests":[{"entityId":..,"entityType":"ENTITY"}]}` — read state
+- `PUT /api/phoenix/state` with `{"controlRequests":[{..,"parameters":{"action":"turnOn"}}]}` — control
+
+`entityType` must be **`ENTITY`**. `APPLIANCE` returns `TargetApplianceNotFoundException`.
+
+`/api/phoenix` (no suffix) returns HTTP 299 with an empty body — it is not the right endpoint.
+
+Wrapped as `/opt/data/alexa/alexa-device` (source in
+`skills/smart-home/alexa-voice/scripts/alexa-device`).

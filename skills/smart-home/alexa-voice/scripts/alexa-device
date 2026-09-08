@@ -1,0 +1,95 @@
+#!/bin/bash
+# alexa-device — read and control Alexa smart-home devices directly via Amazon's
+# phoenix API. Preferred over voice `textcommand`: no Echo involved, returns a real
+# success/failure, and state is verifiable.
+#
+# Usage:
+#   alexa-device list                 list all smart-home devices
+#   alexa-device state "First plug"   print ON / OFF
+#   alexa-device on    "First plug"
+#   alexa-device off   "First plug"
+#
+# Cookies are shared with ./alexa (alexa_remote_control.sh), which mints/refreshes them.
+set -euo pipefail
+
+DIR=$(cd "$(dirname "$0")" && pwd)
+COOKIE="$DIR/.alexa.cookie"
+HOST="${ALEXA:-pitangui.amazon.com}"
+UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+ENTITIES_CACHE="$DIR/.alexa.entities.json"
+
+die() { echo "alexa-device: $*" >&2; exit 1; }
+
+# alexa_remote_control.sh owns login; call it to create/refresh the cookie.
+ensure_cookie() {
+	if [ ! -s "$COOKIE" ]; then
+		"$DIR/alexa" -a >/dev/null 2>&1 || die "login failed — check REFRESH_TOKEN in $DIR/.env"
+	fi
+	[ -s "$COOKIE" ] || die "no cookie at $COOKIE"
+}
+
+csrf() { awk '$0 ~ /csrf/ {print $7}' "$COOKIE" | head -1; }
+
+api() { # method path [body]
+	local method="$1" path="$2" body="${3:-}"
+	local args=(-s -b "$COOKIE" -A "$UA" -H "csrf: $(csrf)" -L)
+	[ -n "$body" ] && args+=(-H "Content-Type: application/json" -X "$method" -d "$body") || args+=(-X "$method")
+	curl "${args[@]}" "https://$HOST$path"
+}
+
+fetch_entities() {
+	api GET "/api/behaviors/entities?skillId=amzn1.ask.1p.smarthome" > "$ENTITIES_CACHE.tmp"
+	if ! jq -e 'type == "array" and length > 0' "$ENTITIES_CACHE.tmp" >/dev/null 2>&1; then
+		# Stale cookie is the usual cause — refresh once and retry.
+		rm -f "$COOKIE"
+		ensure_cookie
+		api GET "/api/behaviors/entities?skillId=amzn1.ask.1p.smarthome" > "$ENTITIES_CACHE.tmp"
+		jq -e 'type == "array" and length > 0' "$ENTITIES_CACHE.tmp" >/dev/null 2>&1 \
+			|| die "could not fetch device list (auth problem?)"
+	fi
+	mv "$ENTITIES_CACHE.tmp" "$ENTITIES_CACHE"
+}
+
+# Exact match first, then case-insensitive substring.
+resolve_id() {
+	local name="$1" id
+	id=$(jq -r --arg n "$name" '.[] | select(.displayName == $n) | .id' "$ENTITIES_CACHE" | head -1)
+	[ -z "$id" ] && id=$(jq -r --arg n "${name,,}" '.[] | select((.displayName|ascii_downcase) | contains($n)) | .id' "$ENTITIES_CACHE" | head -1)
+	[ -n "$id" ] || die "no device matching '$name' (try: alexa-device list)"
+	echo "$id"
+}
+
+get_state() {
+	api POST "/api/phoenix/state" "{\"stateRequests\":[{\"entityId\":\"$1\",\"entityType\":\"ENTITY\"}]}" \
+		| jq -r '.deviceStates[0].capabilityStates[]? // empty' \
+		| jq -r 'select(.name == "powerState") | .value' 2>/dev/null | head -1
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+	list)
+		ensure_cookie; fetch_entities
+		jq -r '.[] | .displayName' "$ENTITIES_CACHE" | sort
+		;;
+	state)
+		[ $# -ge 1 ] || die "usage: alexa-device state \"<device name>\""
+		ensure_cookie; fetch_entities
+		s=$(get_state "$(resolve_id "$1")")
+		echo "${s:-UNKNOWN}"
+		;;
+	on|off)
+		[ $# -ge 1 ] || die "usage: alexa-device $cmd \"<device name>\""
+		ensure_cookie; fetch_entities
+		id=$(resolve_id "$1")
+		action=$([ "$cmd" = on ] && echo turnOn || echo turnOff)
+		resp=$(api PUT "/api/phoenix/state" "{\"controlRequests\":[{\"entityId\":\"$id\",\"entityType\":\"ENTITY\",\"parameters\":{\"action\":\"$action\"}}]}")
+		code=$(echo "$resp" | jq -r '.controlResponses[0].code // "ERROR"')
+		[ "$code" = SUCCESS ] || die "control failed: $(echo "$resp" | jq -c '.errors')"
+		sleep 3
+		echo "$1 is now $(get_state "$id")"   # read back — don't trust the ack alone
+		;;
+	*)
+		sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+		exit 1
+		;;
+esac

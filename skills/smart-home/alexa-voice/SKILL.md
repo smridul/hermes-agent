@@ -1,7 +1,7 @@
 ---
 name: alexa-voice
-description: "Control Alexa-only smart home devices (Amazon Smart Plug, Echo-linked switches) by sending text commands through an Echo device — for devices that expose no local or cloud API of their own. Also does TTS, routines, and playback control on Echo speakers."
-version: 1.0.0
+description: "Read and control Alexa-linked smart home devices — the Amazon Smart Plug, Echo-linked switches and lights — including devices with no local or cloud API of their own. Query on/off state, turn devices on/off, and optionally send spoken commands or TTS through an Echo."
+version: 2.0.0
 author: community
 license: MIT
 metadata:
@@ -12,85 +12,73 @@ prerequisites:
   commands: [jq, curl]
 ---
 
-# Alexa Voice Control
+# Alexa Device Control
 
-Drives Alexa by submitting text to an Echo device exactly as if it had been spoken. Use this
-for devices that can **only** be reached through Alexa — the Amazon-branded Smart Plug being
-the main one, since it has no local API, no third-party cloud API, and no Home Assistant
-integration.
+Reads and controls anything linked to the Alexa account. Use this for devices reachable
+**only** through Alexa — the Amazon-branded Smart Plug especially, which has no local API, no
+third-party cloud API, and no Home Assistant integration.
 
-For anything with a real API, prefer that instead: `hue-cloud` / `openhue` for Hue, or the
-built-in `ha_*` tools for Home Assistant devices. This skill is the last resort, and it
-depends on an unofficial Amazon endpoint.
+For devices with their own API, prefer that: `hue-cloud` / `openhue` for Hue, or the built-in
+`ha_*` tools for Home Assistant.
 
-## Command
+## Preferred: direct API (`alexa-device`)
 
-`/opt/data/alexa/alexa` — a wrapper that loads credentials and pins the US endpoints
-(`amazon.com` / `pitangui.amazon.com`).
-
-It lives under `/opt/data`, a bind mount to `/data/hermes-agent` on the host, so it and its
-credentials survive container rebuilds. It is **not** on `$PATH` — always call it by full path.
-
-## Common Commands
-
-### Control a device through Alexa
+`/opt/data/alexa/alexa-device` — talks to Amazon's smart-home API directly. **Use this by
+default.** No Echo is involved, it returns real success/failure, and state is verifiable.
 
 ```bash
-/opt/data/alexa/alexa -d "Mridul's Echo Dot" -e textcommand:"turn off the plug"
-/opt/data/alexa/alexa -d "Mridul's Echo Dot" -e textcommand:"turn on the plug"
+/opt/data/alexa/alexa-device list                  # all device names
+/opt/data/alexa/alexa-device state "First plug"    # -> ON | OFF
+/opt/data/alexa/alexa-device on    "First plug"    # -> "First plug is now ON"
+/opt/data/alexa/alexa-device off   "First plug"    # -> "First plug is now OFF"
 ```
 
-The phrase must match what you would actually say out loud — the device name has to be the
-one configured in the Alexa app. A wrong name fails silently from our side; Alexa answers
-"I don't know that device" on the Echo.
+`on`/`off` read the state back after acting, so their output reflects what the device actually
+did rather than just that the request was accepted.
 
-### List devices
+Names match exactly first, then case-insensitively by substring — `"plug"` finds
+`"First plug"`. Run `list` if a name doesn't resolve.
+
+**The Amazon Smart Plug on this account is named `First plug`.**
+
+## Fallback: voice (`alexa`)
+
+`/opt/data/alexa/alexa` submits text to an Echo as if spoken. Use it only for things the
+direct API can't do — running Alexa routines, TTS, media playback.
 
 ```bash
-/opt/data/alexa/alexa -a
+/opt/data/alexa/alexa -a                                           # list Echo devices
+/opt/data/alexa/alexa -d "<echo>" -e textcommand:"turn on the plug"
+/opt/data/alexa/alexa -d "<echo>" -e speak:"dinner is ready"       # TTS
+/opt/data/alexa/alexa -d "<echo>" -e automation:"Good Morning"     # run a routine
+/opt/data/alexa/alexa -lastcommand                                 # what Alexa heard
 ```
 
-### Verify a command landed
+`textcommand` is **fire-and-forget** — a clean send does not prove anything happened. If a
+plug is already off, "turn off the plug" is an invisible no-op that looks exactly like
+success. Verify with `alexa-device state`.
 
-```bash
-/opt/data/alexa/alexa -lastcommand
-```
+## Location and credentials
 
-Returns what Alexa's speech recognizer registered. `ASR_REPLACEMENT_TEXT` echoes the command;
-an empty `TTS_REPLACEMENT_TEXT` normally means a device command succeeded (Alexa chimes
-rather than speaking).
+Everything lives in `/opt/data/alexa/` — a bind mount to `/data/hermes-agent` on the host, so
+scripts, cookies and credentials survive container rebuilds. **Not on `$PATH`** — always call
+by full path.
 
-### Other
-
-```bash
-/opt/data/alexa/alexa -d "<device>" -e speak:"dinner is ready"     # TTS
-/opt/data/alexa/alexa -d "<device>" -e automation:"Good Morning"   # run a routine
-/opt/data/alexa/alexa -d "<device>" -e pause|play|next|vol:30      # playback
-```
-
-## Verifying a Toggle Actually Worked
-
-`textcommand` is fire-and-forget — a successful send does not prove the device changed state.
-If a plug is already off, "turn off the plug" is a silent no-op and looks identical to success.
-When it matters, change the device to the **opposite** of its current state and confirm in the
-Alexa app.
-
-## Setup (one-time, operator)
-
-`REFRESH_TOKEN` in `/opt/data/alexa/.env` (mode 600, owned by uid 10000), quoted — the token
-contains a `|` that the shell would otherwise read as a pipe:
+`REFRESH_TOKEN` sits in `/opt/data/alexa/.env` (mode 600, uid 10000), quoted, because the
+token contains a `|` the shell would read as a pipe:
 
 ```
 REFRESH_TOKEN='Atnr|...'
 ```
 
-Obtaining that token is the hard part and is **not** reliably repeatable — see
-`docs/alexa-token-setup.md` before attempting it. Back up the token; do not assume you can
-mint a new one on demand.
+Cookies are minted from that token automatically and refreshed when stale; `alexa-device`
+retries once on a bad device list before giving up.
 
 ## Limitations
 
-- Unofficial. Amazon can break it without notice; the upstream script tracks their changes.
-- The token registers a device on the Amazon account (`alexa_cookie_cli`). Deregistering it
-  from the Amazon device list revokes access immediately.
-- Every command routes through a physical Echo. If the Echo is offline, commands do nothing.
+- Unofficial API. Amazon can change it without notice.
+- Getting a *new* refresh token is painful and unreliable — see `docs/alexa-token-setup.md`.
+  Back the token up; do not assume it can be re-minted on demand.
+- The token registers a device named `alexa_cookie_cli` on the Amazon account. Deregistering
+  it from the Amazon device list revokes access immediately.
+- The voice fallback needs a physically online Echo; the direct API does not.
