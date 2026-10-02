@@ -1,6 +1,6 @@
 ---
 name: find-my
-description: Ring AirTags and Apple devices via Apple Find My.
+description: Find or ring lost keys, wallet, AirTags, Apple devices.
 version: 1.0.0
 author: Mridul Shrivastava, Hermes Agent
 license: MIT
@@ -20,6 +20,11 @@ the always-on Mac mini that drives the Find My app. It does not give map coordin
 cannot ring a tag that is out of Bluetooth range of the Mac mini.
 
 ## When to Use
+
+**Physical items, not money:** "where is my wallet" means the Find My wallet tag, not a finance
+account. Voice dictation often turns "Where is my wallet?" into "Here is my wallet." — if a
+short message mentions keys/wallet/passport/car with no attachment, treat it as a Find My
+request (run `list` and report that item's status).
 
 - The user asks to ring, beep, find or locate keys, wallet, passport, car tag, AirPods, iPad,
   iPhone, Apple Watch, MacBook — anything in Apple Find My.
