@@ -1,0 +1,105 @@
+#!/bin/bash
+# findmy — ring AirTags, Find My tags and Apple devices through the Find My
+# bridge running on the Mac mini (a LaunchAgent that drives the Find My app).
+#
+# Usage:
+#   findmy list            items and devices, with status text
+#   findmy play "keys"     ring it
+#   findmy stop "keys"     stop ringing
+#   findmy health          bridge status (reachable, locked, AX grant)
+#
+# Config (env, or $DIR/.env): FINDMY_BRIDGE_TOKEN (required),
+# FINDMY_BRIDGE_URL (default http://100.80.89.122:8787, Tailscale only).
+set -euo pipefail
+
+DIR=$(cd "$(dirname "$0")" && pwd)
+[ -f "$DIR/.env" ] && . "$DIR/.env"
+URL="${FINDMY_BRIDGE_URL:-http://100.80.89.122:8787}"
+TOKEN="${FINDMY_BRIDGE_TOKEN:-}"
+# A locked Mac waits up to ~12 s for Apple Watch Auto Unlock, and the bridge
+# queues concurrent requests for up to 45 s.
+TIMEOUT=75
+
+die() { echo "findmy: $*" >&2; exit 1; }
+
+# call METHOD PATH [JSON_BODY] -> prints response body; exits on transport failure
+call() {
+	local args=(-sS -m "$TIMEOUT" -X "$1")
+	[ -n "$TOKEN" ] && args+=(-H "Authorization: Bearer $TOKEN")
+	[ $# -ge 3 ] && args+=(-H "Content-Type: application/json" -d "$3")
+	curl "${args[@]}" "$URL$2" 2>/dev/null ||
+		die "Find My bridge on the Mac mini is unreachable ($URL) — is the Mac mini on and on Tailscale?"
+}
+
+need_token() { [ -n "$TOKEN" ] || die "FINDMY_BRIDGE_TOKEN not set (put it in $DIR/.env)"; }
+
+check_auth() {
+	jq -e . >/dev/null 2>&1 <<<"$1" || die "unexpected response from bridge: $1"
+	[ "$(jq -r '.error? // empty' <<<"$1")" != "unauthorized" ] ||
+		die "bridge rejected FINDMY_BRIDGE_TOKEN (token on the Mac mini is ~/.config/findmy-bridge/token)"
+}
+
+# act play|stop NAME
+act() {
+	need_token
+	local verb=$1 name=$2 resp ok err detail
+	resp=$(call POST "/$verb" "$(jq -nc --arg n "$name" '{name: $n}')")
+	check_auth "$resp"
+	ok=$(jq -r '.ok' <<<"$resp")
+	if [ "$ok" = "true" ]; then
+		name=$(jq -r '.name' <<<"$resp")
+		detail=$(jq -r '.detail // ""' <<<"$resp")
+		if [ "$verb" = play ]; then
+			case $detail in
+			"already playing"*) echo "$name is already ringing" ;;
+			*) echo "Ringing $name" ;;
+			esac
+		else
+			echo "Stopped ringing $name"
+		fi
+		return 0
+	fi
+	err=$(jq -r '.error // "unknown"' <<<"$resp")
+	detail=$(jq -r '.detail // ""' <<<"$resp")
+	# AirTags stop by themselves after ~6 s, so "nothing to stop" is not a failure.
+	if [ "$verb" = stop ] && [[ $detail == "not playing"* ]]; then
+		echo "\"$name\" is not ringing (nothing to stop)"
+		return 0
+	fi
+	case $err in
+	not_found)
+		echo "No item or device matches \"$name\". Candidates: $(jq -r '(.candidates // []) | join(", ")' <<<"$resp")" >&2 ;;
+	not_in_range)
+		echo "\"$name\" is not in Bluetooth range of the Mac mini (Find My stuck on Connecting…). $detail" >&2 ;;
+	busy)
+		echo "The Find My bridge is busy with another request — try again shortly." >&2 ;;
+	*)
+		case $detail in
+		screen_locked*)
+			echo "The Mac mini is locked and Apple Watch Auto Unlock didn't unlock it (watch must be on Mridul's wrist, unlocked, near the Mac mini). $detail" >&2 ;;
+		*) echo "Find My action failed ($err): $detail" >&2 ;;
+		esac ;;
+	esac
+	exit 1
+}
+
+case "${1:-}" in
+list)
+	need_token
+	resp=$(call GET /items)
+	check_auth "$resp"
+	jq -r '.items[] | "\(.name)\t\(.kind)\t\(.status // "-")"' <<<"$resp"
+	;;
+play | stop)
+	[ -n "${2:-}" ] || die "usage: findmy $1 \"<name>\""
+	act "$1" "$2"
+	;;
+health)
+	resp=$(call GET /health)
+	jq -r '"reachable: yes\nscreen_locked: \(.screen_locked)\nax_trusted: \(.ax_trusted)\nversion: \(.version)"' <<<"$resp"
+	;;
+*)
+	sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+	exit 2
+	;;
+esac
